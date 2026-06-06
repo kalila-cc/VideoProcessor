@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# Runtime artifacts
+cache/
+output/
+logs/
+temp/
+
+# Local secrets and private scripts
+.env
+.env.*
+secrets/
+*.local.json
+*.private.*
+
+# IDE and OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+

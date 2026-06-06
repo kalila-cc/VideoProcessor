@@ -1,0 +1,27 @@
+{
+  "download_dir": "C:\\Users\\Chris\\Downloads",
+  "archive_base_dir": "D:\\Private\\Videos",
+  "categories": {
+    "XS": {
+      "size_range_kb": [0, 10000],
+      "archive_subdir": "0_XS(0MB_10MB)"
+    },
+    "S": {
+      "size_range_kb": [10000, 20000],
+      "archive_subdir": "1_S(10MB_20MB)"
+    },
+    "M": {
+      "size_range_kb": [20000, 40000],
+      "archive_subdir": "2_M(20MB_40MB)"
+    },
+    "L": {
+      "size_range_kb": [40000, 200000],
+      "archive_subdir": "3_L(40MB_200MB)"
+    },
+    "XL": {
+      "size_range_kb": [200000, null],
+      "archive_subdir": "4_XL(200MB_INF)"
+    }
+  },
+  "video_extensions": [".mp4", ".mov", ".mkv", ".avi", ".wmv", ".webm"]
+}

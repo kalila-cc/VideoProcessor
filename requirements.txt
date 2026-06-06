@@ -1,0 +1,7 @@
+opencv-python
+numpy
+Pillow
+ImageHash
+tqdm
+graphviz
+

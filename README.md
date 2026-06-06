@@ -1,0 +1,65 @@
+# DownloadVideoProcessor
+
+`DownloadVideoProcessor` 是本地视频下载后处理项目。当前主流程已经收敛到一个 Web 工作台：在浏览器中查看下载目录分布、按大小分类、按创建时间规范命名、迁移到视频库并写入相似检测特征缓存，同时审阅和删除相似视频。
+
+## 数据位置
+
+- 下载目录：`C:\Users\Chris\Downloads`
+- 视频库：`D:\Private\Videos`
+- 项目目录：`D:\Projects\DownloadVideoProcessor`
+- 下载整理配置：`config/download_library.json`
+- 相似检测配置：`utils/video_similarity/config.json`
+- 特征缓存：`cache/video_similarity`
+- Web 报告输出：`output/video_similarity`
+
+## 当前主流程
+
+1. 启动 Web 工作台。
+
+   ```powershell
+   cd D:\Projects\DownloadVideoProcessor\scripts
+   python run_similarity.py --server-only
+   ```
+
+2. 打开 `http://localhost:8000`。
+
+3. 在 `下载整理` 页处理下载目录。
+
+   - `一键分类`：把下载根目录中的视频移动到 `XS/S/M/L/XL`，并立即规范命名。
+   - `一键规范命名`：单独处理已分类目录中的历史文件。
+   - `一键迁移并缓存`：先规范命名，再移动到 `D:\Private\Videos` 对应规格目录，并写入相似检测特征缓存。
+
+4. 在 `视频库概览` 页查看最终视频库规格数量、占比和大小分布。
+
+5. 在 `视频对比` 页审阅相似视频；点击 `删除此视频` 会真实删除本地文件，不是标记待删除。
+
+## 重新生成相似检测报告
+
+当前 Web 页面读取 `output/video_similarity/data.json` 和 `index.html`。需要刷新相似对时运行：
+
+```powershell
+cd D:\Projects\DownloadVideoProcessor\scripts
+python run_similarity.py
+```
+
+也可以显式指定已有库和新增目录：
+
+```powershell
+python run_similarity.py -d D:\Private\Videos\0_XS(0MB_10MB) D:\Private\Videos\1_S(10MB_20MB) D:\Private\Videos\2_M(20MB_40MB) D:\Private\Videos\3_L(40MB_200MB) D:\Private\Videos\4_XL(200MB_INF) -i C:\Users\Chris\Downloads\XS C:\Users\Chris\Downloads\S C:\Users\Chris\Downloads\M C:\Users\Chris\Downloads\L C:\Users\Chris\Downloads\XL
+```
+
+## 保留脚本
+
+- `scripts/run_similarity.py`：相似检测、缓存维护、Web 服务启动。
+
+旧的 `run_renamer.py`、`run_mover.py`、`run_pipeline.py` 和 `operation.md` 流程已经移除；对应能力已并入 Web 工作台。清理记录见 `docs/LEGACY_CLEANUP.md`。
+
+## 目录说明
+
+- `config/`：下载整理和路径配置。
+- `scripts/`：当前 CLI 入口。
+- `utils/video_similarity/`：相似检测、报告生成、Web 服务、下载整理 API。
+- `cache/`：相似检测特征缓存，可重建但重建耗时。
+- `output/`：当前 Web 报告数据和页面。
+- `logs/`：历史运行日志。
+- `docs/`：当前架构、操作流程和清理记录。
