@@ -1,6 +1,6 @@
 # DownloadVideoProcessor
 
-`DownloadVideoProcessor` 是本地视频下载后处理项目。当前主流程已经收敛到一个 Web 工作台：在浏览器中查看下载目录分布、按大小分类、按创建时间规范命名、迁移到视频库并写入相似检测特征缓存，同时审阅和删除相似视频。
+`DownloadVideoProcessor` 是本地视频下载后处理项目。当前主流程已经收敛到一个 Web 工作台：查看下载目录分布、按大小分类、按创建时间规范命名、迁移到视频库并写入相似检测特征缓存，同时审阅和删除相似视频。
 
 ## 数据位置
 
@@ -17,8 +17,8 @@
 1. 启动 Web 工作台。
 
    ```powershell
-   cd D:\Projects\DownloadVideoProcessor\scripts
-   python run_similarity.py --server-only
+   cd D:\Projects\DownloadVideoProcessor
+   python scripts\run_similarity.py --server-only
    ```
 
 2. 打开 `http://localhost:8000`。
@@ -33,26 +33,38 @@
 
 5. 在 `视频对比` 页审阅相似视频；点击 `删除此视频` 会真实删除本地文件，不是标记待删除。
 
+## 脚本入口
+
+当前只保留一个脚本入口：
+
+| 脚本 | 用途 |
+| --- | --- |
+| `scripts/run_similarity.py` | 相似检测、缓存维护、Web 工作台启动 |
+
+常用命令：
+
+```powershell
+python scripts\run_similarity.py --server-only
+python scripts\run_similarity.py
+python scripts\run_similarity.py --cache-stats
+python scripts\run_similarity.py --clean-orphan-cache --dry-run
+```
+
+旧的 `run_renamer.py`、`run_mover.py`、`run_pipeline.py` 和 `operation.md` 流程已经移除；对应能力已并入 Web 工作台。清理记录见 `docs/LEGACY_CLEANUP.md`。
+
 ## 重新生成相似检测报告
 
 当前 Web 页面读取 `output/video_similarity/data.json` 和 `index.html`。需要刷新相似对时运行：
 
 ```powershell
-cd D:\Projects\DownloadVideoProcessor\scripts
-python run_similarity.py
+python scripts\run_similarity.py
 ```
 
 也可以显式指定已有库和新增目录：
 
 ```powershell
-python run_similarity.py -d D:\Private\Videos\0_XS(0MB_10MB) D:\Private\Videos\1_S(10MB_20MB) D:\Private\Videos\2_M(20MB_40MB) D:\Private\Videos\3_L(40MB_200MB) D:\Private\Videos\4_XL(200MB_INF) -i C:\Users\Chris\Downloads\XS C:\Users\Chris\Downloads\S C:\Users\Chris\Downloads\M C:\Users\Chris\Downloads\L C:\Users\Chris\Downloads\XL
+python scripts\run_similarity.py -d D:\Private\Videos\0_XS(0MB_10MB) D:\Private\Videos\1_S(10MB_20MB) D:\Private\Videos\2_M(20MB_40MB) D:\Private\Videos\3_L(40MB_200MB) D:\Private\Videos\4_XL(200MB_INF) -i C:\Users\Chris\Downloads\XS C:\Users\Chris\Downloads\S C:\Users\Chris\Downloads\M C:\Users\Chris\Downloads\L C:\Users\Chris\Downloads\XL
 ```
-
-## 保留脚本
-
-- `scripts/run_similarity.py`：相似检测、缓存维护、Web 服务启动。
-
-旧的 `run_renamer.py`、`run_mover.py`、`run_pipeline.py` 和 `operation.md` 流程已经移除；对应能力已并入 Web 工作台。清理记录见 `docs/LEGACY_CLEANUP.md`。
 
 ## 目录说明
 
