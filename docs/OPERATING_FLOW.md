@@ -2,6 +2,16 @@
 
 ## 1. 启动 Web 工作台
 
+推荐双击项目根目录：
+
+```text
+D:\Projects\DownloadVideoProcessor\start_web.bat
+```
+
+如果服务已经在运行，脚本会直接打开页面；如果没有运行，会启动后端服务。
+
+命令行方式：
+
 ```powershell
 cd D:\Projects\DownloadVideoProcessor\scripts
 python run_similarity.py --server-only
