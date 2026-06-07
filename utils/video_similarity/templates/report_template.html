@@ -1093,6 +1093,12 @@
             });
         }
 
+        function setTotalGroups(value) {
+            totalGroups = Math.max(0, Number(value) || 0);
+            const jumpTotal = document.getElementById('jump-total');
+            if (jumpTotal) jumpTotal.textContent = formatCount(totalGroups);
+        }
+
         function escapeHtml(value) {
             return String(value ?? '').replace(/[&<>"']/g, ch => ({
                 '&': '&amp;',
@@ -1144,6 +1150,9 @@
                 const res = await fetch('/api/similarity/refresh-status');
                 const data = await res.json();
                 if (!data.success) throw new Error(data.error || '刷新状态加载失败');
+                if (data.status && Number.isFinite(Number(data.status.active_pairs))) {
+                    setTotalGroups(data.status.active_pairs);
+                }
                 renderSimilarityRefreshStatus(data.status);
                 if (data.status && data.status.running) {
                     startSimilarityRefreshPolling();
@@ -1211,9 +1220,8 @@
         }
 
         async function reloadCompareAfterRefresh(status) {
-            totalGroups = Number(status.active_pairs) || 0;
+            setTotalGroups(status.active_pairs);
             currentIndex = 0;
-            document.getElementById('jump-total').textContent = totalGroups;
 
             if (totalGroups > 0) {
                 document.getElementById('main-view').style.display = 'flex';
@@ -1758,6 +1766,7 @@
 
                     // 特殊处理：如果请求第一组就报错索引越界，说明全部处理完了
                     if (index === 0 && res.status === 400) {
+                        setTotalGroups(0);
                         showEmptyState();
                         return;
                     }
@@ -1773,7 +1782,7 @@
 
                 currentPair = data.pair;
                 currentIndex = data.index;
-                totalGroups = data.total;
+                setTotalGroups(data.total);
                 document.getElementById('main-view').style.display = 'flex';
                 document.getElementById('compare-footer').style.display = 'flex';
                 document.getElementById('empty-state').style.display = 'none';
@@ -1815,7 +1824,7 @@
             document.getElementById('overlay-b').classList.toggle('active', !vB.exists);
 
             document.getElementById('score-text').textContent = currentPair.similarity;
-            document.getElementById('progress-text').textContent = `组 ${currentIndex + 1} / ${totalGroups}`;
+            document.getElementById('progress-text').textContent = `组 ${formatCount(currentIndex + 1)} / ${formatCount(totalGroups)}`;
 
             // 初始化同步
             Promise.all([
@@ -2026,15 +2035,19 @@
             // 无论成功与否都跳转到下一组（API 已从内存中移除该对）
             if (currentIndex < totalGroups - 1) {
                 fetchPair(currentIndex); // 重新加载当前索引（因为数据已更新）
+            } else if (totalGroups > 1) {
+                currentIndex = totalGroups - 2;
+                fetchPair(currentIndex);
             } else {
-                alert('已完成预览');
+                setTotalGroups(0);
+                showEmptyState();
             }
         }
         function jumpToGroup() {
             const input = document.getElementById('jump-input');
             const val = parseInt(input.value);
             if (isNaN(val) || val < 1 || val > totalGroups) {
-                alert(`请输入有效的组号 (1-${totalGroups})`);
+                alert(`请输入有效的组号 (1-${formatCount(totalGroups)})`);
                 return;
             }
             currentIndex = val - 1;
@@ -2046,7 +2059,7 @@
         function hideLoading() { document.getElementById('loading-overlay').style.display = 'none'; }
 
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('jump-total').textContent = totalGroups;
+            setTotalGroups(METADATA.total);
             loadSimilarityRefreshStatus();
 
             if (totalGroups > 0) {
