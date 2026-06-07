@@ -1043,6 +1043,7 @@
         let videoLibraryStatusLoaded = false;
         let similarityRefreshPollTimer = null;
         let similarityRefreshWasRunning = false;
+        let isJumpInputEditing = false;
         let similarityRefreshStatus = {
             running: false,
             phase: 'idle',
@@ -1102,9 +1103,19 @@
 
         function setTotalGroups(value) {
             totalGroups = Math.max(0, Number(value) || 0);
+            syncJumpControls();
+            syncSimilarityStatusTotal();
+        }
+
+        function syncJumpControls() {
             const jumpTotal = document.getElementById('jump-total');
             if (jumpTotal) jumpTotal.textContent = formatCount(totalGroups);
-            syncSimilarityStatusTotal();
+
+            const jumpInput = document.getElementById('jump-input');
+            if (jumpInput && !isJumpInputEditing) {
+                jumpInput.value = totalGroups > 0 ? String(currentIndex + 1) : '';
+                jumpInput.max = String(Math.max(1, totalGroups));
+            }
         }
 
         function escapeHtml(value) {
@@ -1849,6 +1860,7 @@
 
             document.getElementById('score-text').textContent = currentPair.similarity;
             document.getElementById('progress-text').textContent = `组 ${formatCount(currentIndex + 1)} / ${formatCount(totalGroups)}`;
+            syncJumpControls();
 
             // 初始化同步
             Promise.all([
@@ -2166,6 +2178,15 @@
         function hideLoading() { document.getElementById('loading-overlay').style.display = 'none'; }
 
         document.addEventListener('DOMContentLoaded', () => {
+            const jumpInput = document.getElementById('jump-input');
+            if (jumpInput) {
+                jumpInput.addEventListener('focus', () => { isJumpInputEditing = true; });
+                jumpInput.addEventListener('blur', () => {
+                    isJumpInputEditing = false;
+                    syncJumpControls();
+                });
+            }
+
             setTotalGroups(METADATA.total);
             loadSimilarityRefreshStatus();
 
