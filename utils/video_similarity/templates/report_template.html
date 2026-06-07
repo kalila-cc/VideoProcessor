@@ -1920,25 +1920,19 @@
         function bindDirectClickToggle(art, containerSelector) {
             const root = document.querySelector(containerSelector) || (art.template && (art.template.$player || art.template.player));
             if (!root) return;
-            let clickTimer = null;
-            let lastClickAt = 0;
+
+            if (typeof root.__videoInteractionCleanup === 'function') {
+                root.__videoInteractionCleanup();
+            }
+
             let lastFullscreenToggleAt = 0;
 
-            const clearClickTimer = () => {
-                if (clickTimer) {
-                    clearTimeout(clickTimer);
-                    clickTimer = null;
-                }
-            };
-
             const toggleFromDoubleClick = () => {
-                clearClickTimer();
-                lastClickAt = 0;
                 lastFullscreenToggleAt = Date.now();
                 togglePlayerFullscreen(art, root);
             };
 
-            root.addEventListener('click', (event) => {
+            const handleClick = (event) => {
                 if (isPlayerChromeEvent(event)) {
                     return;
                 }
@@ -1946,26 +1940,18 @@
                 event.preventDefault();
                 event.stopImmediatePropagation();
 
-                const now = Date.now();
-                if (event.detail >= 2 || now - lastClickAt <= PLAYER_SINGLE_CLICK_DELAY_MS) {
-                    toggleFromDoubleClick();
+                if (event.detail >= 2 || isFullscreenActive(art, root)) {
                     return;
                 }
 
-                lastClickAt = now;
-                clearClickTimer();
-                clickTimer = setTimeout(() => {
-                    clickTimer = null;
-                    lastClickAt = 0;
-                    if (art.video.paused) {
-                        playCurrentPairFromClick(art);
-                    } else {
-                        pauseCurrentPairFromClick(art);
-                    }
-                }, PLAYER_SINGLE_CLICK_DELAY_MS);
-            }, true);
+                if (art.video.paused) {
+                    playCurrentPairFromClick(art);
+                } else {
+                    pauseCurrentPairFromClick(art);
+                }
+            };
 
-            root.addEventListener('dblclick', (event) => {
+            const handleDblClick = (event) => {
                 if (isPlayerChromeEvent(event)) {
                     return;
                 }
@@ -1975,20 +1961,41 @@
                 if (Date.now() - lastFullscreenToggleAt > PLAYER_SINGLE_CLICK_DELAY_MS) {
                     toggleFromDoubleClick();
                 }
-            }, true);
+            };
 
-            art.on('video:dblclick', (event) => {
+            const handleVideoDblClick = (event) => {
                 if (event && typeof event.preventDefault === 'function') event.preventDefault();
                 if (Date.now() - lastFullscreenToggleAt > PLAYER_SINGLE_CLICK_DELAY_MS) {
                     toggleFromDoubleClick();
                 }
-            });
+            };
+
+            root.addEventListener('click', handleClick, true);
+            root.addEventListener('dblclick', handleDblClick, true);
+            art.on('video:dblclick', handleVideoDblClick);
+
+            root.__videoInteractionCleanup = () => {
+                root.removeEventListener('click', handleClick, true);
+                root.removeEventListener('dblclick', handleDblClick, true);
+                if (typeof art.off === 'function') {
+                    art.off('video:dblclick', handleVideoDblClick);
+                }
+                root.__videoInteractionCleanup = null;
+            };
         }
 
         function isPlayerChromeEvent(event) {
             const target = event.target;
             if (!target || typeof target.closest !== 'function') return false;
             return Boolean(target.closest('.art-control, .art-setting, .art-contextmenus, .art-info, .art-notice, button, input, select, textarea'));
+        }
+
+        function isFullscreenActive(art, root) {
+            const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement;
+            return Boolean(
+                art && art.fullscreen ||
+                fullscreenElement && (fullscreenElement === root || root.contains(fullscreenElement) || fullscreenElement.contains(root))
+            );
         }
 
         function togglePlayerFullscreen(art, fullscreenRoot = null) {
