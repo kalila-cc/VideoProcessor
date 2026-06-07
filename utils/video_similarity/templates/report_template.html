@@ -2030,10 +2030,21 @@
             const root = fullscreenRoot || (art.template && (art.template.$player || art.template.player));
             if (!root) return;
 
+            try {
+                if (typeof art.fullscreen !== 'undefined') {
+                    art.fullscreen = !art.fullscreen;
+                    focusPlayerRoot(root);
+                    return;
+                }
+            } catch (e) {
+                console.warn('[Player] ArtPlayer fullscreen toggle failed:', e);
+            }
+
             const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement;
             if (fullscreenElement) {
                 const exitFullscreen = document.exitFullscreen || document.webkitExitFullscreen;
                 if (exitFullscreen) exitFullscreen.call(document);
+                focusPlayerRoot(root);
                 return;
             }
 
@@ -2043,16 +2054,17 @@
                 if (result && typeof result.catch === 'function') {
                     result.catch(err => console.warn('[Player] Browser fullscreen blocked:', err));
                 }
+                focusPlayerRoot(root);
                 return;
             }
+        }
 
-            try {
-                if (typeof art.fullscreen !== 'undefined') {
-                    art.fullscreen = !art.fullscreen;
-                }
-            } catch (e) {
-                console.warn('[Player] ArtPlayer fullscreen toggle failed:', e);
+        function focusPlayerRoot(root) {
+            if (!root || typeof root.focus !== 'function') return;
+            if (!root.hasAttribute('tabindex')) {
+                root.setAttribute('tabindex', '-1');
             }
+            requestAnimationFrame(() => root.focus({ preventScroll: true }));
         }
 
         function getClickPlaybackTargets(sourceArt) {
