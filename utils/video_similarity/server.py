@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote
 
+from .config import PROJECT_ROOT, load_processor_config, resolve_project_path
+
 class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
     """
     Custom handler to serve the similarity report and handle pruning API calls.
@@ -235,14 +237,12 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
 
     @classmethod
     def _project_root(cls):
-        return Path(__file__).resolve().parents[2]
+        return PROJECT_ROOT
 
     @classmethod
     def _load_download_library_config(cls):
         root = cls._project_root()
-        config_file = root / "config" / "download_library.json"
-        with open(config_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        data = load_processor_config()
 
         categories = []
         for name, item in data.get('categories', {}).items():
@@ -254,14 +254,14 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
                 'archive_subdir': item.get('archive_subdir', name),
             })
 
-        extensions = [ext.lower() for ext in data.get('video_extensions', ['.mp4', '.mov', '.mkv', '.avi', '.wmv', '.webm'])]
+        extensions = [ext.lower() for ext in data.get('video_extensions', [])]
         return {
             'project_root': root,
-            'download_dir': Path(data.get('download_dir', r'C:\Users\Chris\Downloads')).resolve(),
-            'archive_base': Path(data.get('archive_base_dir', r'D:\Private\Videos')).resolve(),
+            'download_dir': resolve_project_path(data['download_dir']),
+            'archive_base': resolve_project_path(data['archive_base_dir']),
             'extensions': extensions,
             'categories': categories,
-            'cache_dir': root / 'cache' / 'video_similarity',
+            'cache_dir': resolve_project_path(data['cache_dir']),
         }
 
     @staticmethod

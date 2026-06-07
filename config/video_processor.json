@@ -1,6 +1,9 @@
 {
   "download_dir": "C:\\Users\\Chris\\Downloads",
   "archive_base_dir": "D:\\Private\\Videos",
+  "cache_dir": "cache/video_similarity",
+  "output_dir": "output/video_similarity",
+  "log_dir": "logs",
   "categories": {
     "XS": {
       "size_range_kb": [0, 10000],
@@ -23,5 +26,20 @@
       "archive_subdir": "4_XL(200MB_INF)"
     }
   },
-  "video_extensions": [".mp4", ".mov", ".mkv", ".avi", ".wmv", ".webm"]
+  "video_extensions": [".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".m4v"],
+  "base_dirs": [],
+  "incremental_dirs": [],
+  "similarity": {
+    "num_sample_frames": 15,
+    "weight_duration": 0.1,
+    "weight_phash": 0.4,
+    "weight_dhash": 0.2,
+    "weight_histogram": 0.3,
+    "duration_threshold": 0.8,
+    "similarity_high": 0.9,
+    "similarity_medium": 0.8,
+    "hash_size": 16,
+    "hist_bins": 64,
+    "max_workers": 4
+  }
 }

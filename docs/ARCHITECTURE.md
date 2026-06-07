@@ -25,7 +25,7 @@
 - `3_L(40MB_200MB)`
 - `4_XL(200MB_INF)`
 
-两者映射定义在 `config/download_library.json`。
+两者映射定义在 `config/video_processor.json`。
 
 ## 核心模块
 
@@ -33,6 +33,7 @@
 
 - 当前唯一保留的脚本入口。
 - 支持相似度扫描、增量扫描、缓存统计、孤立缓存清理和 Web 服务启动。
+- 默认读取 `config/video_processor.json` 中的扫描目录、缓存目录、输出目录和相似检测参数。
 - 不再支持旧的 `operation.md --prune` 删除流程。
 
 `utils/video_similarity/checker.py`
@@ -47,7 +48,7 @@
 
 `utils/video_similarity/cache.py`
 
-- 将视频特征写入 `cache/video_similarity`。
+- 将视频特征写入 `config/video_processor.json` 中配置的 `cache_dir`。
 - 缓存文件名基于视频路径和内容信息生成。
 
 `utils/video_similarity/reporter.py`

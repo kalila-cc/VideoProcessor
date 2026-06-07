@@ -2,13 +2,14 @@
 
 `DownloadVideoProcessor` 是本地视频下载后处理项目。当前主流程已经收敛到一个 Web 工作台：查看下载目录分布、按大小分类、按创建时间规范命名、迁移到视频库并写入相似检测特征缓存，同时审阅和删除相似视频。
 
+所有运行路径、视频规格映射、缓存位置、报告输出位置和相似检测参数统一由 `config/video_processor.json` 维护。
+
 ## 数据位置
 
 - 下载目录：`C:\Users\Chris\Downloads`
 - 视频库：`D:\Private\Videos`
 - 项目目录：`D:\Projects\DownloadVideoProcessor`
-- 下载整理配置：`config/download_library.json`
-- 相似检测配置：`utils/video_similarity/config.json`
+- 统一配置：`config/video_processor.json`
 - 特征缓存：`cache/video_similarity`
 - Web 报告输出：`output/video_similarity`
 
@@ -68,7 +69,7 @@ python scripts\run_similarity.py -d D:\Private\Videos\0_XS(0MB_10MB) D:\Private\
 
 ## 目录说明
 
-- `config/`：下载整理和路径配置。
+- `config/`：统一配置。
 - `scripts/`：当前 CLI 入口。
 - `utils/video_similarity/`：相似检测、报告生成、Web 服务、下载整理 API。
 - `cache/`：相似检测特征缓存，可重建但重建耗时。

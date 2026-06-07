@@ -30,4 +30,4 @@
 
 ## 当前配置入口
 
-`utils/video_similarity/server.py` 读取 `config/download_library.json`。当前项目主流程不再依赖 `utils/video_renamer`。
+`utils/video_similarity/server.py` 和 `scripts/run_similarity.py` 都读取 `config/video_processor.json`。当前项目主流程不再依赖 `utils/video_renamer`。

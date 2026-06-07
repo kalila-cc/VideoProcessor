@@ -50,7 +50,7 @@ python run_similarity.py
 
 ## 5. 重新生成相似检测结果
 
-默认读取 `utils/video_similarity/config.json`：
+默认读取 `config/video_processor.json`：
 
 ```powershell
 cd D:\Projects\DownloadVideoProcessor\scripts

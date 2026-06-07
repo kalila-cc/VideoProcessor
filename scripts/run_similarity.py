@@ -13,7 +13,7 @@
 
 配置：
     修改 VIDEO_DIRECTORIES 列表，指定要扫描的视频目录
-    或在 config.json 中配置 base_dirs 和 incremental_dirs
+    或在 config/video_processor.json 中配置 base_dirs 和 incremental_dirs
 """
 
 import sys
@@ -43,14 +43,13 @@ VIDEO_DIRECTORIES = [
     # 添加更多目录...
 ]
 
-# 相似度阈值现在从 config.json 的 similarity_medium 字段读取
-# 如需修改阈值，请编辑 utils/video_similarity/config.json
+# 相似度阈值从 config/video_processor.json 的 similarity.similarity_medium 字段读取。
 
 # 缓存目录（设为 None 使用默认位置，优先读取配置）
 CACHE_DIR = None
 
-# 默认输出目录
-DEFAULT_OUTPUT_DIR = "output/video_similarity"
+# 输出目录默认从 config/video_processor.json 读取。
+DEFAULT_OUTPUT_DIR = None
 
 # ======================================
 
@@ -176,7 +175,7 @@ def run_cache_clean(checker, dry_run: bool):
 
 
 def run_similarity_check(directories: list, cache_dir: str = None, 
-                        output_dir: str = DEFAULT_OUTPUT_DIR):
+                        output_dir: str = None):
     """
     运行视频相似性检查
     
@@ -186,7 +185,7 @@ def run_similarity_check(directories: list, cache_dir: str = None,
         output_dir: 输出目录
     
     Note:
-        阈值从 config.json 的 similarity_medium 字段读取
+        阈值从 config/video_processor.json 的 similarity.similarity_medium 字段读取
     """
     
     if not directories:
@@ -200,6 +199,7 @@ def run_similarity_check(directories: list, cache_dir: str = None,
     
     # 初始化 Checker（会自动加载配置）
     checker = VideoSimilarityChecker(cache_dir=cache_dir)
+    output_dir = output_dir or checker.config.output_dir
     threshold = checker.config.similarity_medium
     
     print(f"视频相似性检查 | 阈值: {threshold:.0%} | 目录: {len(directories)} 个")
@@ -259,7 +259,7 @@ def run_similarity_check(directories: list, cache_dir: str = None,
 
 
 def run_incremental_check(base_dirs: list, incremental_dirs: list, 
-                          cache_dir: str = None, output_dir: str = DEFAULT_OUTPUT_DIR):
+                          cache_dir: str = None, output_dir: str = None):
     """
     运行增量视频相似性检查（新视频 vs 已有库）
     
@@ -270,7 +270,7 @@ def run_incremental_check(base_dirs: list, incremental_dirs: list,
         output_dir: 输出目录
     
     Note:
-        阈值从 config.json 的 similarity_medium 字段读取
+        阈值从 config/video_processor.json 的 similarity.similarity_medium 字段读取
     """
     
     if not base_dirs:
@@ -288,6 +288,7 @@ def run_incremental_check(base_dirs: list, incremental_dirs: list,
     
     # 初始化 Checker（会自动加载配置）
     checker = VideoSimilarityChecker(cache_dir=cache_dir)
+    output_dir = output_dir or checker.config.output_dir
     threshold = checker.config.similarity_medium
     
     print(f"增量相似性检查 | 阈值: {threshold:.0%}")
@@ -371,7 +372,7 @@ def main():
   python run_similarity.py --clear-cache       清除所有特征缓存
   python run_similarity.py --clean-orphan-cache 清理孤立特征缓存 (无法匹配视频的文件)
 阈值配置:
-  相似度阈值从 utils/video_similarity/config.json 的 similarity_medium 字段读取
+  相似度阈值从 config/video_processor.json 的 similarity.similarity_medium 字段读取
         '''
     )
     
@@ -402,8 +403,8 @@ def main():
     parser.add_argument(
         '--output',
         type=str,
-        default=DEFAULT_OUTPUT_DIR,
-        help=f'输出目录 (默认: {DEFAULT_OUTPUT_DIR})'
+        default=None,
+        help='输出目录；不指定时读取 config/video_processor.json 的 output_dir'
     )
     parser.add_argument(
         '--clean-orphan-cache',

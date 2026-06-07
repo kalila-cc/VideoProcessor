@@ -9,6 +9,6 @@ utils/
 └── data_structures/     # 从旧项目保留的数据结构工具
 ```
 
-`video_similarity/server.py` 读取 `config/download_library.json` 来执行下载目录分类、规范命名、迁移入库和特征缓存写入。
+`video_similarity/server.py` 读取 `config/video_processor.json` 来执行下载目录分类、规范命名、迁移入库和特征缓存写入。
 
 旧的 `video_renamer` 模块已经移除；分类、规范命名和迁移能力由 Web 工作台统一提供。
