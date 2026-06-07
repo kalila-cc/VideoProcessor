@@ -823,7 +823,7 @@
             <section id="compare-page" class="page-view active">
     <div class="compare-toolbar">
         <div class="compare-tools">
-            <div class="compare-status" id="similarity-refresh-status">当前展示上次扫描结果</div>
+            <div class="compare-status" id="similarity-refresh-status">正在读取相似组状态...</div>
             <div class="cache-maintenance-status" id="cache-maintenance-status">孤立缓存清理可先预览，不会影响视频文件。</div>
         </div>
         <div class="compare-actions">
@@ -1043,6 +1043,12 @@
         let videoLibraryStatusLoaded = false;
         let similarityRefreshPollTimer = null;
         let similarityRefreshWasRunning = false;
+        let similarityRefreshStatus = {
+            running: false,
+            phase: 'idle',
+            active_pairs: totalGroups,
+            total_pairs: totalGroups,
+        };
         let cacheMaintenanceBusy = false;
         const PLAYER_SINGLE_CLICK_DELAY_MS = 420;
         const SIMILARITY_REFRESH_MODES = {
@@ -1098,6 +1104,7 @@
             totalGroups = Math.max(0, Number(value) || 0);
             const jumpTotal = document.getElementById('jump-total');
             if (jumpTotal) jumpTotal.textContent = formatCount(totalGroups);
+            syncSimilarityStatusTotal();
         }
 
         function escapeHtml(value) {
@@ -1115,13 +1122,20 @@
             const buttons = document.querySelectorAll('[data-refresh-action]');
             if (!statusEl) return;
 
+            similarityRefreshStatus = {
+                ...similarityRefreshStatus,
+                ...status,
+                active_pairs: Number.isFinite(Number(status.active_pairs)) ? Number(status.active_pairs) : totalGroups,
+            };
+            status = similarityRefreshStatus;
+
             const activePairs = Number.isFinite(Number(status.active_pairs))
                 ? Number(status.active_pairs)
                 : totalGroups;
             const totalPairs = Number.isFinite(Number(status.total_pairs))
                 ? Number(status.total_pairs)
                 : activePairs;
-            const baseText = `当前展示 ${formatCount(activePairs)} 组`;
+            const baseText = `当前可处理 ${formatCount(activePairs)} 组`;
             const modeLabel = status.mode_label || (status.mode ? SIMILARITY_REFRESH_MODES[status.mode]?.label : '') || '相似比对';
 
             statusEl.classList.toggle('running', Boolean(status.running));
@@ -1144,6 +1158,15 @@
             }
 
             statusEl.textContent = `${baseText} · 使用上次扫描结果`;
+        }
+
+        function syncSimilarityStatusTotal() {
+            const statusEl = document.getElementById('similarity-refresh-status');
+            if (!statusEl || similarityRefreshStatus.running) return;
+            renderSimilarityRefreshStatus({
+                ...similarityRefreshStatus,
+                active_pairs: totalGroups,
+            });
         }
 
         async function loadSimilarityRefreshStatus() {
