@@ -27,7 +27,10 @@ http://localhost:8000
 
 ### 执行相似检测
 
-已启动 Web 工作台时，可直接在 `视频对比` 页点击 `重新扫描比对`，后台会调用同一脚本刷新报告和当前会话数据。
+已启动 Web 工作台时，优先在 `视频比对` 页使用：
+
+- `增量比对下载区`：调用同一脚本执行 `-d 视频库目录 -i 下载规格目录`。
+- `全库重新扫描`：调用同一脚本只扫描视频库目录，执行全量两两比对。
 
 使用配置文件中的目录：
 
@@ -49,6 +52,8 @@ python scripts\run_similarity.py -d D:\Private\Videos\0_XS(0MB_10MB) D:\Private\
 - `logs/video_similarity/incremental_result.log`
 
 ### 缓存维护
+
+已启动 Web 工作台时，可在 `视频比对` 页先 `预览孤立缓存`，确认后再 `清理孤立缓存`。该操作只删除无用特征缓存，不删除视频文件。
 
 ```powershell
 python scripts\run_similarity.py --cache-stats

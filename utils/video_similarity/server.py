@@ -30,6 +30,8 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
     _REFRESH_STATUS = {
         'running': False,
         'phase': 'idle',
+        'mode': None,
+        'mode_label': None,
         'message': '尚未手动刷新',
         'started_at': None,
         'finished_at': None,
@@ -79,6 +81,8 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_download_library_migrate()
         elif self.path == '/api/similarity/refresh':
             self.handle_similarity_refresh()
+        elif self.path == '/api/cache/orphans':
+            self.handle_cache_orphans()
         else:
             self.send_error(404, "Endpoint not found")
 
@@ -255,6 +259,15 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
         logging.error(log_msg)
         if exception and not isinstance(exception, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
             logging.error(traceback.format_exc())
+
+    def _read_json_body(self):
+        content_length = int(self.headers.get('Content-Length', 0) or 0)
+        if content_length <= 0:
+            return {}
+        post_data = self.rfile.read(content_length)
+        if not post_data:
+            return {}
+        return json.loads(post_data.decode('utf-8'))
 
     @classmethod
     def _project_root(cls):
@@ -545,6 +558,70 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
             self.send_json_response(self._build_download_library_status())
         except Exception as e:
             self.log_exception_stack("Download library status error", e)
+            self.send_json_response({'success': False, 'error': str(e)}, 500)
+
+    @classmethod
+    def _archive_dirs_from_config(cls, cfg=None):
+        cfg = cfg or cls._load_download_library_config()
+        return [str(cfg['archive_base'] / category['archive_subdir']) for category in cfg['categories']]
+
+    @classmethod
+    def _download_incremental_dirs_from_config(cls, cfg=None):
+        cfg = cfg or cls._load_download_library_config()
+        return [str(cfg['download_dir'] / category['name']) for category in cfg['categories']]
+
+    @classmethod
+    def _collect_cache_valid_video_files(cls):
+        cfg = cls._load_download_library_config()
+        scan_dirs = [
+            cfg['download_dir'],
+            *[Path(path) for path in cls._archive_dirs_from_config(cfg)],
+            *[Path(path) for path in cls._download_incremental_dirs_from_config(cfg)],
+        ]
+        seen = set()
+        video_files = []
+        for directory in scan_dirs:
+            for file_path in cls._scan_recursive_videos(directory, cfg['extensions']):
+                key = str(file_path.resolve()).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                video_files.append(str(file_path))
+        return video_files
+
+    def handle_cache_orphans(self):
+        try:
+            data = self._read_json_body()
+            dry_run = bool(data.get('dry_run', True))
+            if not dry_run and self._get_refresh_status().get('running'):
+                self.send_json_response({
+                    'success': False,
+                    'error': '相似比对正在运行，请等待完成后再执行缓存清理。',
+                }, 409)
+                return
+
+            from .cache import FeatureCache
+            from .config import SimilarityConfig
+            from .janitor import CacheJanitor
+
+            cfg = self._load_download_library_config()
+            sim_config = SimilarityConfig()
+            sim_config.cache_dir = str(cfg['cache_dir'])
+            feature_cache = FeatureCache(str(cfg['cache_dir']))
+            janitor = CacheJanitor(sim_config, feature_cache)
+
+            video_files = self._collect_cache_valid_video_files()
+            result = janitor.clean_orphans(video_files, dry_run=dry_run)
+            result['valid_video_count'] = len(video_files)
+            result['freed_mb'] = round(result.get('freed_bytes', 0) / (1024 * 1024), 2)
+
+            self.send_json_response({
+                'success': result.get('status') == 'success',
+                'dry_run': dry_run,
+                'result': result,
+            })
+        except Exception as e:
+            self.log_exception_stack("Cache orphan cleanup error", e)
             self.send_json_response({'success': False, 'error': str(e)}, 500)
 
     def handle_download_library_classify(self):
@@ -896,7 +973,15 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
         })
 
     def handle_similarity_refresh(self):
-        output_dir = self._SERVER_OUTPUT_DIR or self.base_dir
+        try:
+            data = self._read_json_body()
+            mode = data.get('mode') or 'full_library'
+            output_dir = Path(self._SERVER_OUTPUT_DIR or self.base_dir).resolve()
+            command_info = self._build_similarity_refresh_command(mode, output_dir)
+        except Exception as e:
+            self.send_json_response({'success': False, 'error': str(e)}, 400)
+            return
+
         now = datetime.now().isoformat(timespec='seconds')
 
         with self._REFRESH_LOCK:
@@ -914,7 +999,9 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
             self._REFRESH_STATUS.update({
                 'running': True,
                 'phase': 'starting',
-                'message': '正在启动相似比对扫描...',
+                'mode': command_info['mode'],
+                'mode_label': command_info['label'],
+                'message': f"正在启动{command_info['label']}...",
                 'started_at': now,
                 'finished_at': None,
                 'return_code': None,
@@ -927,7 +1014,7 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
 
         worker = threading.Thread(
             target=self._run_similarity_refresh_job,
-            args=(Path(output_dir).resolve(),),
+            args=(command_info,),
             daemon=True,
             name='similarity-refresh',
         )
@@ -941,21 +1028,78 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
         })
 
     @classmethod
-    def _run_similarity_refresh_job(cls, output_dir: Path):
+    def _build_similarity_refresh_command(cls, mode: str, output_dir: Path):
+        cfg = cls._load_download_library_config()
+        archive_dirs = cls._archive_dirs_from_config(cfg)
+        download_dirs = cls._download_incremental_dirs_from_config(cfg)
         script_path = PROJECT_ROOT / 'scripts' / 'run_similarity.py'
-        cmd = [
-            sys.executable,
-            str(script_path),
-            '--output',
-            str(output_dir),
-        ]
+        output_dir = Path(output_dir).resolve()
+
+        if mode == 'incremental_downloads':
+            download_videos = []
+            for directory in download_dirs:
+                download_videos.extend(cls._scan_recursive_videos(Path(directory), cfg['extensions']))
+            if not download_videos:
+                raise RuntimeError("下载规格目录中没有待比对视频，请先在下载整理页执行分类。")
+
+            cmd = [
+                sys.executable,
+                str(script_path),
+                '--output',
+                str(output_dir),
+                '-d',
+                *archive_dirs,
+                '-i',
+                *download_dirs,
+            ]
+            return {
+                'mode': mode,
+                'label': '增量比对下载区',
+                'cmd': cmd,
+                'output_dir': output_dir,
+                'base_dir_count': len(archive_dirs),
+                'incremental_dir_count': len(download_dirs),
+                'preflight_video_count': len(download_videos),
+            }
+
+        if mode == 'full_library':
+            archive_videos = []
+            for directory in archive_dirs:
+                archive_videos.extend(cls._scan_recursive_videos(Path(directory), cfg['extensions']))
+            if len(archive_videos) < 2:
+                raise RuntimeError("视频库少于 2 个视频，无法执行全库相似扫描。")
+
+            cmd = [
+                sys.executable,
+                str(script_path),
+                '--output',
+                str(output_dir),
+                '-d',
+                *archive_dirs,
+            ]
+            return {
+                'mode': mode,
+                'label': '全库重新扫描',
+                'cmd': cmd,
+                'output_dir': output_dir,
+                'base_dir_count': len(archive_dirs),
+                'incremental_dir_count': 0,
+                'preflight_video_count': len(archive_videos),
+            }
+
+        raise RuntimeError(f"未知相似比对模式: {mode}")
+
+    @classmethod
+    def _run_similarity_refresh_job(cls, command_info: dict):
+        output_dir = Path(command_info['output_dir']).resolve()
+        cmd = command_info['cmd']
         env = os.environ.copy()
         env['PYTHONIOENCODING'] = 'utf-8'
 
         try:
             cls._set_refresh_status(
                 phase='running',
-                message='正在扫描视频并计算相似度...',
+                message=f"{command_info['label']}正在扫描视频并计算相似度...",
                 last_output='',
             )
             process = subprocess.Popen(
@@ -999,11 +1143,13 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
                 running=False,
                 phase='complete',
                 message=(
-                    f"刷新完成：生成 {summary['raw_count']} 组，"
+                    f"{command_info['label']}完成：生成 {summary['raw_count']} 组，"
                     f"当前展示 {summary['active_count']} 组"
                 ),
                 finished_at=datetime.now().isoformat(timespec='seconds'),
                 return_code=0,
+                mode=command_info['mode'],
+                mode_label=command_info['label'],
                 total_pairs=summary['raw_count'],
                 active_pairs=summary['active_count'],
                 error=None,

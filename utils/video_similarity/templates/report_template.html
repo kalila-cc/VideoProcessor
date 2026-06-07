@@ -288,6 +288,21 @@
             padding: 1rem 1.5rem 0;
         }
 
+        .compare-tools {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+
+        .compare-actions {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 0.6rem;
+            flex-wrap: wrap;
+        }
+
         .compare-status {
             min-width: 0;
             color: var(--text-sub);
@@ -303,6 +318,20 @@
 
         .compare-status.error {
             color: #fca5a5;
+        }
+
+        .cache-maintenance-status {
+            color: var(--text-sub);
+            font-size: 0.78rem;
+            min-height: 1rem;
+        }
+
+        .cache-maintenance-status.error {
+            color: #fca5a5;
+        }
+
+        .cache-maintenance-status.success {
+            color: #86efac;
         }
 
         .btn {
@@ -793,8 +822,16 @@
         <section class="workspace">
             <section id="compare-page" class="page-view active">
     <div class="compare-toolbar">
-        <div class="compare-status" id="similarity-refresh-status">当前展示上次扫描结果</div>
-        <button class="btn btn-secondary" id="refresh-similarity-btn" onclick="refreshSimilarity()">重新扫描比对</button>
+        <div class="compare-tools">
+            <div class="compare-status" id="similarity-refresh-status">当前展示上次扫描结果</div>
+            <div class="cache-maintenance-status" id="cache-maintenance-status">孤立缓存清理可先预览，不会影响视频文件。</div>
+        </div>
+        <div class="compare-actions">
+            <button class="btn btn-primary" data-refresh-action onclick="refreshSimilarity('incremental_downloads')">增量比对下载区</button>
+            <button class="btn btn-secondary" data-refresh-action onclick="refreshSimilarity('full_library')">全库重新扫描</button>
+            <button class="btn btn-secondary" id="cache-preview-btn" onclick="previewOrphanCacheCleanup()">预览孤立缓存</button>
+            <button class="btn btn-secondary" id="cache-clean-btn" onclick="cleanOrphanCache()">清理孤立缓存</button>
+        </div>
     </div>
 
     <main id="main-view">
@@ -842,7 +879,8 @@
         <h2>🎉 已全部处理完毕</h2>
         <p>所有相似视频对都已清理或标记为均保留。<br>当前目录下暂无更多待处理项目。</p>
         <div style="display: flex; gap: 1rem; margin-top: 2rem;">
-            <button class="btn btn-primary" onclick="refreshSimilarity()">重新扫描比对</button>
+            <button class="btn btn-primary" onclick="refreshSimilarity('incremental_downloads')">增量比对下载区</button>
+            <button class="btn btn-secondary" onclick="refreshSimilarity('full_library')">全库重新扫描</button>
             <button class="btn btn-secondary" onclick="window.close()">关闭页面</button>
         </div>
     </div>
@@ -1005,6 +1043,17 @@
         let videoLibraryStatusLoaded = false;
         let similarityRefreshPollTimer = null;
         let similarityRefreshWasRunning = false;
+        let cacheMaintenanceBusy = false;
+        const SIMILARITY_REFRESH_MODES = {
+            incremental_downloads: {
+                label: '增量比对下载区',
+                confirm: '将只对下载区规格目录中的视频与现有视频库做增量比对，适合日常处理新下载视频。继续？',
+            },
+            full_library: {
+                label: '全库重新扫描',
+                confirm: '将对整个视频库做全量两两相似扫描，视频多时会很慢。继续？',
+            },
+        };
 
         function switchTab(tab) {
             document.querySelectorAll('.nav-tab').forEach(btn => btn.classList.remove('active'));
@@ -1056,8 +1105,8 @@
 
         function renderSimilarityRefreshStatus(status = {}) {
             const statusEl = document.getElementById('similarity-refresh-status');
-            const button = document.getElementById('refresh-similarity-btn');
-            if (!statusEl || !button) return;
+            const buttons = document.querySelectorAll('[data-refresh-action]');
+            if (!statusEl) return;
 
             const activePairs = Number.isFinite(Number(status.active_pairs))
                 ? Number(status.active_pairs)
@@ -1066,23 +1115,24 @@
                 ? Number(status.total_pairs)
                 : activePairs;
             const baseText = `当前展示 ${formatCount(activePairs)} 组`;
+            const modeLabel = status.mode_label || (status.mode ? SIMILARITY_REFRESH_MODES[status.mode]?.label : '') || '相似比对';
 
             statusEl.classList.toggle('running', Boolean(status.running));
             statusEl.classList.toggle('error', Boolean(status.error) && !status.running);
-            button.disabled = Boolean(status.running);
+            buttons.forEach(button => { button.disabled = Boolean(status.running); });
 
             if (status.running) {
-                statusEl.textContent = `${baseText} · 正在刷新：${status.message || '扫描中...'}`;
+                statusEl.textContent = `${baseText} · ${modeLabel}运行中：${status.message || '扫描中...'}`;
                 return;
             }
 
             if (status.error) {
-                statusEl.textContent = `${baseText} · 刷新失败：${status.error}`;
+                statusEl.textContent = `${baseText} · ${modeLabel}失败：${status.error}`;
                 return;
             }
 
             if (status.phase === 'complete') {
-                statusEl.textContent = `${baseText} · 上次刷新生成 ${formatCount(totalPairs)} 组`;
+                statusEl.textContent = `${baseText} · ${modeLabel}完成，生成 ${formatCount(totalPairs)} 组`;
                 return;
             }
 
@@ -1103,13 +1153,18 @@
             }
         }
 
-        async function refreshSimilarity() {
-            if (!confirm('将按当前配置重新扫描视频库并刷新相似比对结果，可能耗时较久。继续？')) {
+        async function refreshSimilarity(mode = 'incremental_downloads') {
+            const modeInfo = SIMILARITY_REFRESH_MODES[mode] || SIMILARITY_REFRESH_MODES.incremental_downloads;
+            if (!confirm(modeInfo.confirm)) {
                 return;
             }
 
             try {
-                const res = await fetch('/api/similarity/refresh', { method: 'POST' });
+                const res = await fetch('/api/similarity/refresh', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode }),
+                });
                 const data = await res.json();
                 if (!data.success) throw new Error(data.error || '无法启动刷新任务');
                 renderSimilarityRefreshStatus(data.status);
@@ -1169,6 +1224,70 @@
                 showEmptyState();
                 hideLoading();
             }
+        }
+
+        function renderCacheMaintenanceStatus(message, state = '') {
+            const statusEl = document.getElementById('cache-maintenance-status');
+            if (!statusEl) return;
+            statusEl.classList.toggle('error', state === 'error');
+            statusEl.classList.toggle('success', state === 'success');
+            statusEl.textContent = message;
+        }
+
+        function setCacheMaintenanceBusy(isBusy) {
+            cacheMaintenanceBusy = isBusy;
+            const previewBtn = document.getElementById('cache-preview-btn');
+            const cleanBtn = document.getElementById('cache-clean-btn');
+            if (previewBtn) previewBtn.disabled = isBusy;
+            if (cleanBtn) cleanBtn.disabled = isBusy;
+        }
+
+        function renderCacheCleanupResult(result, dryRun) {
+            const count = result.deleted_count || 0;
+            const size = formatBytes(result.freed_bytes || 0);
+            const validCount = result.valid_video_count || result.valid_count || 0;
+            const verb = dryRun ? '可清理' : '已清理';
+            const suffix = result.error_count ? `，失败 ${formatCount(result.error_count)} 个` : '';
+            renderCacheMaintenanceStatus(
+                `孤立缓存${dryRun ? '预览' : '清理'}完成：有效视频 ${formatCount(validCount)} 个，${verb} ${formatCount(count)} 个缓存文件，释放 ${size}${suffix}`,
+                result.error_count ? 'error' : 'success'
+            );
+        }
+
+        async function runOrphanCacheCleanup(dryRun) {
+            if (cacheMaintenanceBusy) return;
+            if (!dryRun && !confirm('将删除无法对应到现存视频路径的孤立特征缓存文件，不会删除视频文件。继续？')) {
+                return;
+            }
+
+            setCacheMaintenanceBusy(true);
+            renderCacheMaintenanceStatus(dryRun ? '正在预览孤立缓存...' : '正在清理孤立缓存...');
+            try {
+                const res = await fetch('/api/cache/orphans', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ dry_run: dryRun }),
+                });
+                const data = await res.json();
+                if (!data.success) throw new Error(data.error || '缓存清理失败');
+                renderCacheCleanupResult(data.result || {}, dryRun);
+                if (!dryRun) {
+                    downloadStatusLoaded = false;
+                    videoLibraryStatusLoaded = false;
+                }
+            } catch (e) {
+                renderCacheMaintenanceStatus(`孤立缓存处理失败：${e.message}`, 'error');
+            } finally {
+                setCacheMaintenanceBusy(false);
+            }
+        }
+
+        function previewOrphanCacheCleanup() {
+            runOrphanCacheCleanup(true);
+        }
+
+        function cleanOrphanCache() {
+            runOrphanCacheCleanup(false);
         }
 
         function renderDownloadVisuals(data) {
