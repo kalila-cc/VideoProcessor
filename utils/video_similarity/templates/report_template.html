@@ -1940,7 +1940,7 @@
                 event.preventDefault();
                 event.stopImmediatePropagation();
 
-                if (event.detail >= 2 || isFullscreenActive(art, root)) {
+                if (event.detail >= 2) {
                     return;
                 }
 
@@ -1988,14 +1988,6 @@
             const target = event.target;
             if (!target || typeof target.closest !== 'function') return false;
             return Boolean(target.closest('.art-control, .art-setting, .art-contextmenus, .art-info, .art-notice, button, input, select, textarea'));
-        }
-
-        function isFullscreenActive(art, root) {
-            const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement;
-            return Boolean(
-                art && art.fullscreen ||
-                fullscreenElement && (fullscreenElement === root || root.contains(fullscreenElement) || fullscreenElement.contains(root))
-            );
         }
 
         function togglePlayerFullscreen(art, fullscreenRoot = null) {
