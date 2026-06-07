@@ -280,6 +280,31 @@
             align-items: center;
         }
 
+        .compare-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            padding: 1rem 1.5rem 0;
+        }
+
+        .compare-status {
+            min-width: 0;
+            color: var(--text-sub);
+            font-size: 0.85rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .compare-status.running {
+            color: #bfdbfe;
+        }
+
+        .compare-status.error {
+            color: #fca5a5;
+        }
+
         .btn {
             padding: 0.5rem 1rem;
             border-radius: 8px;
@@ -767,6 +792,11 @@
 
         <section class="workspace">
             <section id="compare-page" class="page-view active">
+    <div class="compare-toolbar">
+        <div class="compare-status" id="similarity-refresh-status">当前展示上次扫描结果</div>
+        <button class="btn btn-secondary" id="refresh-similarity-btn" onclick="refreshSimilarity()">重新扫描比对</button>
+    </div>
+
     <main id="main-view">
         <div class="video-container" id="container-a">
             <div id="overlay-a" class="deleted-overlay"><b>文件已删除</b></div>
@@ -811,7 +841,10 @@
     <div id="empty-state" style="display: none;">
         <h2>🎉 已全部处理完毕</h2>
         <p>所有相似视频对都已清理或标记为均保留。<br>当前目录下暂无更多待处理项目。</p>
-        <button class="btn btn-primary" onclick="window.close()" style="margin-top: 2rem;">关闭页面</button>
+        <div style="display: flex; gap: 1rem; margin-top: 2rem;">
+            <button class="btn btn-primary" onclick="refreshSimilarity()">重新扫描比对</button>
+            <button class="btn btn-secondary" onclick="window.close()">关闭页面</button>
+        </div>
     </div>
 
     <footer id="compare-footer">
@@ -970,6 +1003,8 @@
         let downloadStatusLoaded = false;
         let videoLibraryStatus = null;
         let videoLibraryStatusLoaded = false;
+        let similarityRefreshPollTimer = null;
+        let similarityRefreshWasRunning = false;
 
         function switchTab(tab) {
             document.querySelectorAll('.nav-tab').forEach(btn => btn.classList.remove('active'));
@@ -1017,6 +1052,123 @@
                 '"': '&quot;',
                 "'": '&#39;',
             }[ch]));
+        }
+
+        function renderSimilarityRefreshStatus(status = {}) {
+            const statusEl = document.getElementById('similarity-refresh-status');
+            const button = document.getElementById('refresh-similarity-btn');
+            if (!statusEl || !button) return;
+
+            const activePairs = Number.isFinite(Number(status.active_pairs))
+                ? Number(status.active_pairs)
+                : totalGroups;
+            const totalPairs = Number.isFinite(Number(status.total_pairs))
+                ? Number(status.total_pairs)
+                : activePairs;
+            const baseText = `当前展示 ${formatCount(activePairs)} 组`;
+
+            statusEl.classList.toggle('running', Boolean(status.running));
+            statusEl.classList.toggle('error', Boolean(status.error) && !status.running);
+            button.disabled = Boolean(status.running);
+
+            if (status.running) {
+                statusEl.textContent = `${baseText} · 正在刷新：${status.message || '扫描中...'}`;
+                return;
+            }
+
+            if (status.error) {
+                statusEl.textContent = `${baseText} · 刷新失败：${status.error}`;
+                return;
+            }
+
+            if (status.phase === 'complete') {
+                statusEl.textContent = `${baseText} · 上次刷新生成 ${formatCount(totalPairs)} 组`;
+                return;
+            }
+
+            statusEl.textContent = `${baseText} · 使用上次扫描结果`;
+        }
+
+        async function loadSimilarityRefreshStatus() {
+            try {
+                const res = await fetch('/api/similarity/refresh-status');
+                const data = await res.json();
+                if (!data.success) throw new Error(data.error || '刷新状态加载失败');
+                renderSimilarityRefreshStatus(data.status);
+                if (data.status && data.status.running) {
+                    startSimilarityRefreshPolling();
+                }
+            } catch (e) {
+                renderSimilarityRefreshStatus({ error: e.message, active_pairs: totalGroups });
+            }
+        }
+
+        async function refreshSimilarity() {
+            if (!confirm('将按当前配置重新扫描视频库并刷新相似比对结果，可能耗时较久。继续？')) {
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/similarity/refresh', { method: 'POST' });
+                const data = await res.json();
+                if (!data.success) throw new Error(data.error || '无法启动刷新任务');
+                renderSimilarityRefreshStatus(data.status);
+                startSimilarityRefreshPolling();
+            } catch (e) {
+                renderSimilarityRefreshStatus({ error: e.message, active_pairs: totalGroups });
+                alert('启动刷新失败: ' + e.message);
+            }
+        }
+
+        function startSimilarityRefreshPolling() {
+            similarityRefreshWasRunning = true;
+            if (similarityRefreshPollTimer) return;
+            similarityRefreshPollTimer = setInterval(pollSimilarityRefreshStatus, 2000);
+            pollSimilarityRefreshStatus();
+        }
+
+        async function pollSimilarityRefreshStatus() {
+            try {
+                const res = await fetch('/api/similarity/refresh-status');
+                const data = await res.json();
+                if (!data.success) throw new Error(data.error || '刷新状态加载失败');
+
+                const status = data.status || {};
+                renderSimilarityRefreshStatus(status);
+
+                if (!status.running) {
+                    clearInterval(similarityRefreshPollTimer);
+                    similarityRefreshPollTimer = null;
+
+                    if (similarityRefreshWasRunning) {
+                        similarityRefreshWasRunning = false;
+                        if (!status.error && status.phase === 'complete') {
+                            await reloadCompareAfterRefresh(status);
+                        }
+                    }
+                }
+            } catch (e) {
+                clearInterval(similarityRefreshPollTimer);
+                similarityRefreshPollTimer = null;
+                similarityRefreshWasRunning = false;
+                renderSimilarityRefreshStatus({ error: e.message, active_pairs: totalGroups });
+            }
+        }
+
+        async function reloadCompareAfterRefresh(status) {
+            totalGroups = Number(status.active_pairs) || 0;
+            currentIndex = 0;
+            document.getElementById('jump-total').textContent = totalGroups;
+
+            if (totalGroups > 0) {
+                document.getElementById('main-view').style.display = 'flex';
+                document.getElementById('compare-footer').style.display = 'flex';
+                document.getElementById('empty-state').style.display = 'none';
+                await fetchPair(0);
+            } else {
+                showEmptyState();
+                hideLoading();
+            }
         }
 
         function renderDownloadVisuals(data) {
@@ -1501,7 +1653,11 @@
                 }
 
                 currentPair = data.pair;
+                currentIndex = data.index;
                 totalGroups = data.total;
+                document.getElementById('main-view').style.display = 'flex';
+                document.getElementById('compare-footer').style.display = 'flex';
+                document.getElementById('empty-state').style.display = 'none';
                 renderPair();
             } catch (e) {
                 alert('加载失败: ' + e.message);
@@ -1771,11 +1927,14 @@
         function hideLoading() { document.getElementById('loading-overlay').style.display = 'none'; }
 
         document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('jump-total').textContent = totalGroups;
+            loadSimilarityRefreshStatus();
+
             if (totalGroups > 0) {
-                document.getElementById('jump-total').textContent = totalGroups;
                 fetchPair(0);
             } else {
-                showLoading('未发现相似对');
+                showEmptyState();
+                hideLoading();
             }
         });
     </script>

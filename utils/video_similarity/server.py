@@ -10,6 +10,7 @@ import traceback
 import hashlib
 import math
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote
@@ -24,6 +25,20 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
     _SESSION_DATA = []  # 会话期间过滤后的活跃数据
     _DISMISSED_FILE = None  # dismissed.json 文件路径
     _DISMISSED_PAIRS = {}  # 已忽略的视频对 {pair_id: {...}}
+    _SERVER_OUTPUT_DIR = None
+    _REFRESH_LOCK = threading.Lock()
+    _REFRESH_STATUS = {
+        'running': False,
+        'phase': 'idle',
+        'message': '尚未手动刷新',
+        'started_at': None,
+        'finished_at': None,
+        'return_code': None,
+        'total_pairs': 0,
+        'active_pairs': 0,
+        'error': None,
+        'last_output': '',
+    }
 
     def __init__(self, *args, directory=None, **kwargs):
         self.base_dir = Path(directory).resolve() if directory else Path.cwd()
@@ -62,6 +77,8 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_download_library_rename()
         elif self.path == '/api/download-library/migrate':
             self.handle_download_library_migrate()
+        elif self.path == '/api/similarity/refresh':
+            self.handle_similarity_refresh()
         else:
             self.send_error(404, "Endpoint not found")
 
@@ -92,6 +109,10 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
 
         if parsed.path == '/api/video-library/status':
             self.handle_video_library_status()
+            return
+
+        if parsed.path == '/api/similarity/refresh-status':
+            self.handle_similarity_refresh_status()
             return
             
         # 视频流式传输：支持 Range 请求 (拖拽进度条)
@@ -854,6 +875,151 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self.send_json_response({'error': str(e)}, 500)
 
+    @classmethod
+    def _set_refresh_status(cls, **updates):
+        with cls._REFRESH_LOCK:
+            cls._REFRESH_STATUS.update(updates)
+            return dict(cls._REFRESH_STATUS)
+
+    @classmethod
+    def _get_refresh_status(cls):
+        with cls._REFRESH_LOCK:
+            status = dict(cls._REFRESH_STATUS)
+        status['total_pairs'] = status.get('total_pairs') or len(cls._SESSION_DATA)
+        status['active_pairs'] = len(cls._SESSION_DATA)
+        return status
+
+    def handle_similarity_refresh_status(self):
+        self.send_json_response({
+            'success': True,
+            'status': self._get_refresh_status(),
+        })
+
+    def handle_similarity_refresh(self):
+        output_dir = self._SERVER_OUTPUT_DIR or self.base_dir
+        now = datetime.now().isoformat(timespec='seconds')
+
+        with self._REFRESH_LOCK:
+            if self._REFRESH_STATUS.get('running'):
+                status = dict(self._REFRESH_STATUS)
+                status['active_pairs'] = len(self._SESSION_DATA)
+                self.send_json_response({
+                    'success': True,
+                    'started': False,
+                    'already_running': True,
+                    'status': status,
+                })
+                return
+
+            self._REFRESH_STATUS.update({
+                'running': True,
+                'phase': 'starting',
+                'message': '正在启动相似比对扫描...',
+                'started_at': now,
+                'finished_at': None,
+                'return_code': None,
+                'total_pairs': len(self._SESSION_DATA),
+                'active_pairs': len(self._SESSION_DATA),
+                'error': None,
+                'last_output': '',
+            })
+            status = dict(self._REFRESH_STATUS)
+
+        worker = threading.Thread(
+            target=self._run_similarity_refresh_job,
+            args=(Path(output_dir).resolve(),),
+            daemon=True,
+            name='similarity-refresh',
+        )
+        worker.start()
+
+        self.send_json_response({
+            'success': True,
+            'started': True,
+            'already_running': False,
+            'status': status,
+        })
+
+    @classmethod
+    def _run_similarity_refresh_job(cls, output_dir: Path):
+        script_path = PROJECT_ROOT / 'scripts' / 'run_similarity.py'
+        cmd = [
+            sys.executable,
+            str(script_path),
+            '--output',
+            str(output_dir),
+        ]
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+
+        try:
+            cls._set_refresh_status(
+                phase='running',
+                message='正在扫描视频并计算相似度...',
+                last_output='',
+            )
+            process = subprocess.Popen(
+                cmd,
+                cwd=str(PROJECT_ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                bufsize=1,
+                env=env,
+            )
+
+            if process.stdout:
+                for line in process.stdout:
+                    message = line.strip()
+                    if not message:
+                        continue
+                    print(f"[Refresh] {message}")
+                    cls._set_refresh_status(
+                        phase='running',
+                        message=message,
+                        last_output=message,
+                    )
+
+            return_code = process.wait()
+            if return_code != 0:
+                cls._set_refresh_status(
+                    running=False,
+                    phase='failed',
+                    message=f'相似比对刷新失败，退出码 {return_code}',
+                    finished_at=datetime.now().isoformat(timespec='seconds'),
+                    return_code=return_code,
+                    error=f'Process exited with code {return_code}',
+                )
+                return
+
+            summary = cls._reload_session_from_disk(output_dir)
+            cls._set_refresh_status(
+                running=False,
+                phase='complete',
+                message=(
+                    f"刷新完成：生成 {summary['raw_count']} 组，"
+                    f"当前展示 {summary['active_count']} 组"
+                ),
+                finished_at=datetime.now().isoformat(timespec='seconds'),
+                return_code=0,
+                total_pairs=summary['raw_count'],
+                active_pairs=summary['active_count'],
+                error=None,
+            )
+        except Exception as e:
+            logging.error("Similarity refresh job failed")
+            logging.error(traceback.format_exc())
+            cls._set_refresh_status(
+                running=False,
+                phase='failed',
+                message=f'相似比对刷新失败：{e}',
+                finished_at=datetime.now().isoformat(timespec='seconds'),
+                return_code=None,
+                error=str(e),
+            )
+
 
     def handle_prune(self):
         """
@@ -1094,6 +1260,45 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
         
         cls._SESSION_DATA = new_data
 
+    @classmethod
+    def _reload_session_from_disk(cls, output_dir: Path):
+        output_dir = Path(output_dir).resolve()
+        data_file = output_dir / "data.json"
+
+        with open(data_file, 'r', encoding='utf-8') as f:
+            raw_data = json.load(f)
+
+        dismissed_file = output_dir / "dismissed.json"
+        dismissed_pairs = cls._load_dismissed_pairs(dismissed_file)
+        dismissed_count = 0
+        missing_count = 0
+        filtered_data = []
+
+        for pair in raw_data:
+            videos = pair.get('videos', [])
+            if any(not os.path.exists(video.get('originalPath', '')) for video in videos):
+                missing_count += 1
+                continue
+
+            if len(videos) >= 2:
+                path_a = videos[0].get('originalPath', '')
+                path_b = videos[1].get('originalPath', '')
+                pair_id = cls._generate_pair_id(path_a, path_b)
+                if pair_id in dismissed_pairs:
+                    dismissed_count += 1
+                    continue
+
+            filtered_data.append(pair)
+
+        cls._SESSION_DATA = filtered_data
+        return {
+            'raw_count': len(raw_data),
+            'active_count': len(filtered_data),
+            'dismissed_count': dismissed_count,
+            'missing_count': missing_count,
+            'output_dir': str(output_dir),
+        }
+
 def run_server(output_dir, port=8000):
 
     """
@@ -1142,43 +1347,17 @@ def run_server(output_dir, port=8000):
     # Load and filter data for the session
     print(f"Loading and validating video similarity data...")
     try:
-        with open(data_file, 'r', encoding='utf-8') as f:
-            raw_data = json.load(f)
-        
-        # 加载已忽略的视频对缓存
-        dismissed_file = output_dir / "dismissed.json"
-        dismissed_pairs = SimilarityReportHandler._load_dismissed_pairs(dismissed_file)
-        dismissed_count = 0
-        
-        filtered_data = []
-        for pair in raw_data:
-            # Check if all videos in the pair exist
-            all_exist = True
-            videos = pair.get('videos', [])
-            for video in videos:
-                if not os.path.exists(video.get('originalPath', '')):
-                    all_exist = False
-                    break
-            
-            if not all_exist:
-                continue
-            
-            # 检查是否已被用户忽略（均保留）
-            if len(videos) >= 2:
-                path_a = videos[0].get('originalPath', '')
-                path_b = videos[1].get('originalPath', '')
-                pair_id = SimilarityReportHandler._generate_pair_id(path_a, path_b)
-                if pair_id in dismissed_pairs:
-                    dismissed_count += 1
-                    continue
-            
-            filtered_data.append(pair)
-        
-        # Set to class variable
-        SimilarityReportHandler._SESSION_DATA = filtered_data
-        
-        if dismissed_count > 0:
-            print(f"[Server] Skipped {dismissed_count} dismissed pairs from cache")
+        summary = SimilarityReportHandler._reload_session_from_disk(output_dir)
+        SimilarityReportHandler._SERVER_OUTPUT_DIR = output_dir
+        SimilarityReportHandler._set_refresh_status(
+            total_pairs=summary['raw_count'],
+            active_pairs=summary['active_count'],
+        )
+
+        if summary['dismissed_count'] > 0:
+            print(f"[Server] Skipped {summary['dismissed_count']} dismissed pairs from cache")
+        if summary['missing_count'] > 0:
+            print(f"[Server] Skipped {summary['missing_count']} pairs with missing files")
     except Exception as e:
         print(f"Error initializing session data: {e}")
         return
@@ -1189,8 +1368,8 @@ def run_server(output_dir, port=8000):
     print(f"Root Directory: {output_dir}")
     print(f"Server URL:     http://localhost:{port}")
     print(f"Features:       Dynamic Data Loading & Pruning")
-    if len(raw_data) > len(filtered_data):
-        print(f"Status:         Showing {len(filtered_data)} unresolved out of {len(raw_data)} total pairs")
+    if summary['raw_count'] > summary['active_count']:
+        print(f"Status:         Showing {summary['active_count']} unresolved out of {summary['raw_count']} total pairs")
     print(f"="*60 + "\n")
     print("[Press Ctrl+C to stop the server]")
 

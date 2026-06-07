@@ -29,6 +29,7 @@ os.chdir(PROJECT_ROOT)
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from utils.video_similarity import VideoSimilarityChecker, SimilarityConfig, CacheJanitor
+from utils.video_similarity.reporter import VideoSimilarityReporter
 from utils.video_similarity.server import run_server
 import webbrowser
 import json
@@ -358,6 +359,19 @@ def run_incremental_check(base_dirs: list, incremental_dirs: list,
     return True
 
 
+def refresh_report_html_from_data(output_dir: Path) -> bool:
+    """Regenerate index.html from the current template and existing data.json."""
+    output_dir = Path(output_dir)
+    data_file = output_dir / 'data.json'
+    if not data_file.exists():
+        return False
+
+    with open(data_file, 'r', encoding='utf-8') as f:
+        report_data = json.load(f)
+    VideoSimilarityReporter.generate_html_report(report_data, output_dir)
+    return True
+
+
 def main():
     """命令行入口"""
     parser = argparse.ArgumentParser(
@@ -453,9 +467,7 @@ def main():
             if choice in ['', 'y', 'yes']:
                 print(f"[System] 正在使用最新代码模板刷新 UI 界面...")
                 try:
-                    with open(data_file, 'r', encoding='utf-8') as f:
-                        report_data = json.load(f)
-                    VideoSimilarityReporter.generate_html_report(report_data, out_dir)
+                    refresh_report_html_from_data(out_dir)
                     args.server_only = True
                 except Exception as e:
                     print(f"[Error] 刷新 UI 失败: {e}")
@@ -473,6 +485,13 @@ def main():
         # 预检
         data_file = Path(output_dir) / 'data.json'
         index_file = Path(output_dir) / 'index.html'
+
+        if data_file.exists():
+            try:
+                print(f"[System] 正在使用最新代码模板刷新 UI 界面...")
+                refresh_report_html_from_data(Path(output_dir))
+            except Exception as e:
+                print(f"[Warning] 刷新 UI 失败，将尝试使用现有 index.html: {e}")
         
         if not data_file.exists() or not index_file.exists():
             print("\n" + "!"*60)

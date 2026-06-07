@@ -44,13 +44,16 @@ python run_similarity.py
 
 进入 Web 左侧 `视频对比`。
 
+- `重新扫描比对`：按当前统一配置在后台重新执行相似检测，刷新 `output/video_similarity/data.json` 和页面会话数据。
 - `忽略此组`：只在 Web 报告层忽略相似对，不移动或删除视频。
 - `删除此视频`：真实删除本地文件，并同步当前报告状态。
 - 视频播放直接读取原始文件路径，不依赖复制文件。
 
 ## 5. 重新生成相似检测结果
 
-默认读取 `config/video_processor.json`：
+优先在 Web 左侧 `视频对比` 点击 `重新扫描比对`。该操作会启动后台任务，页面显示最新状态，任务完成后自动重新载入可处理的视频组。
+
+命令行方式同样默认读取 `config/video_processor.json`：
 
 ```powershell
 cd D:\Projects\DownloadVideoProcessor\scripts

@@ -25,7 +25,7 @@
 - `extractor.py`：抽帧并计算 pHash、dHash、颜色直方图等特征。
 - `checker.py`：协调扫描、特征提取和相似度计算。
 - `reporter.py`：生成 Web 使用的 `data.json` 和 `index.html`。
-- `server.py`：本地 Web 服务，支持视频预览、真实删除、下载整理、迁移入库和缓存写入。
+- `server.py`：本地 Web 服务，支持视频预览、相似检测后台刷新、真实删除、下载整理、迁移入库和缓存写入。
 - `templates/report_template.html`：Web 工作台页面模板。
 
 ## 常用入口
@@ -37,6 +37,8 @@ python scripts\run_similarity.py --server-only
 python scripts\run_similarity.py
 python scripts\run_similarity.py --cache-stats
 ```
+
+Web `视频对比` 页的 `重新扫描比对` 按钮会在后台调用同一脚本入口刷新报告，完成后重新载入当前会话数据。
 
 代码调用：
 

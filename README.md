@@ -32,7 +32,7 @@
 
 4. 在 `视频库概览` 页查看最终视频库规格数量、占比和大小分布。
 
-5. 在 `视频对比` 页审阅相似视频；点击 `删除此视频` 会真实删除本地文件，不是标记待删除。
+5. 在 `视频对比` 页审阅相似视频；点击 `重新扫描比对` 可在后台刷新相似结果；点击 `删除此视频` 会真实删除本地文件，不是标记待删除。
 
 ## 脚本入口
 
@@ -55,7 +55,9 @@ python scripts\run_similarity.py --clean-orphan-cache --dry-run
 
 ## 重新生成相似检测报告
 
-当前 Web 页面读取 `output/video_similarity/data.json` 和 `index.html`。需要刷新相似对时运行：
+当前 Web 页面读取 `output/video_similarity/data.json` 和 `index.html`。需要刷新相似对时，优先在 Web 的 `视频对比` 页点击 `重新扫描比对`；页面会显示后台刷新状态，并在完成后重新载入当前可处理的视频组。
+
+也可以在命令行运行：
 
 ```powershell
 python scripts\run_similarity.py
