@@ -42,6 +42,8 @@ JSON 使用原子写入，SQLite 允许并发连接。不要删除 `content-inde
 
 ## 验证
 
+测试代码仅在本地保留，以下命令需要本地 `tests/` 目录：
+
 ```powershell
 python -m unittest discover -s tests -v
 ```

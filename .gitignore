@@ -10,6 +10,9 @@ env/
 *.egg-info/
 .pytest_cache/
 
+# Local verification code (not published)
+/tests/
+
 # Runtime artifacts
 cache/
 output/
@@ -31,4 +34,3 @@ secrets/
 .DS_Store
 Thumbs.db
 desktop.ini
-

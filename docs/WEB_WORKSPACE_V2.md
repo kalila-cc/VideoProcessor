@@ -40,7 +40,7 @@
 python scripts/run_similarity.py --server-only --no-browser
 ```
 
-隔离集成测试：
+测试代码仅在本地保留，不随仓库发布。以下命令适用于已有本地 `tests/` 目录的工作环境：
 
 ```powershell
 python -m unittest discover -s tests -v
