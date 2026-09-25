@@ -447,9 +447,10 @@ def main():
     parser.add_argument(
         '--server-only',
         action='store_true',
-        help='跳过相似度分析，直接启动 Web 服务器（需已有 data.json）'
+        help='跳过相似度分析，直接启动 Web 工作台（首次启动自动创建空报告）'
     )
     
+    parser.add_argument('--no-browser', action='store_true', help='启动服务时不自动打开浏览器')
     args = parser.parse_args()
     
     # --- 交互式引导：无参数且存在旧报告时，询问是否启动 Server ---
@@ -482,33 +483,21 @@ def main():
         checker = VideoSimilarityChecker(cache_dir=args.cache_dir)
         output_dir = args.output if args.output else checker.config.output_dir
         
-        # 预检
-        data_file = Path(output_dir) / 'data.json'
-        index_file = Path(output_dir) / 'index.html'
+        # run_server creates an empty report on first launch and loads the current UI.
+        if not args.no_browser:
+            import threading
+            import time
+            import urllib.request
+            def open_when_ready():
+                for _ in range(100):
+                    try:
+                        with urllib.request.urlopen('http://127.0.0.1:8000/api/metadata', timeout=1):
+                            webbrowser.open('http://127.0.0.1:8000')
+                            return
+                    except Exception:
+                        time.sleep(0.2)
+            threading.Thread(target=open_when_ready, daemon=True).start()
 
-        if data_file.exists():
-            try:
-                print(f"[System] 正在使用最新代码模板刷新 UI 界面...")
-                refresh_report_html_from_data(Path(output_dir))
-            except Exception as e:
-                print(f"[Warning] 刷新 UI 失败，将尝试使用现有 index.html: {e}")
-        
-        if not data_file.exists() or not index_file.exists():
-            print("\n" + "!"*60)
-            print(f"错误: 无法启动服务器，输出目录缺失必要文件。")
-            print(f"检查目录: {output_dir}")
-            print("建议: 请运行一次完整的相似度扫描来生成报告。")
-            print("!"*60 + "\n")
-            return
-        
-        url = "http://localhost:8000"
-        print(f"\n[System] 正在启动 Web 界面: {url}")
-        
-        try:
-            webbrowser.open(url)
-        except:
-            pass
-            
         run_server(output_dir)
         return
     

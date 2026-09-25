@@ -11,7 +11,7 @@ from PIL import Image
 import imagehash
 
 from .config import SimilarityConfig
-from .features import VideoFeatures
+from .features import VideoFeatures, sample_frame_positions
 from .cache import FeatureCache
 
 
@@ -55,26 +55,13 @@ class VideoFeatureExtractor:
         Returns:
             采样帧位置列表
         """
-        if total_frames <= self.config.num_sample_frames:
-            return list(range(total_frames))
-        
-        positions = set()
-        
-        # 添加锚点帧：首帧、尾帧、中点帧
-        positions.add(0)
-        positions.add(total_frames - 1)
-        positions.add(total_frames // 2)
-        
-        # 均匀分布其余帧
-        remaining = self.config.num_sample_frames - 3
-        if remaining > 0:
-            step = total_frames / (remaining + 1)
-            for i in range(1, remaining + 1):
-                pos = int(i * step)
-                positions.add(min(pos, total_frames - 1))
-        
-        return sorted(positions)
-    
+        return sample_frame_positions(total_frames, self.config.num_sample_frames)
+
+    @property
+    def cache_profile(self):
+        return {'algorithm': 1, 'num_sample_frames': self.config.num_sample_frames,
+                'hash_size': self.config.hash_size, 'hist_bins': self.config.hist_bins}
+
     def _compute_histogram(self, frame: np.ndarray) -> np.ndarray:
         """
         计算颜色直方图
@@ -137,7 +124,7 @@ class VideoFeatureExtractor:
         
         # 尝试从缓存获取
         if use_cache and self.cache:
-            cached = self.cache.get(video_path)
+            cached = self.cache.get(video_path, profile=self.cache_profile)
             if cached:
                 if verbose:
                     print(f"  [缓存命中] {file_name}")
@@ -145,6 +132,8 @@ class VideoFeatureExtractor:
         
         if verbose:
             print(f"  [提取特征] {file_name}")
+
+        source_stat = Path(video_path).stat()
         
         # 打开视频
         cap = cv2.VideoCapture(video_path)
@@ -185,6 +174,10 @@ class VideoFeatureExtractor:
         
         finally:
             cap.release()
+
+        current_stat = Path(video_path).stat()
+        if (source_stat.st_size, source_stat.st_mtime_ns, source_stat.st_ino) != (current_stat.st_size, current_stat.st_mtime_ns, current_stat.st_ino):
+            raise RuntimeError('视频在特征提取期间发生变化，请稍后重试')
         
         # 计算文件哈希
         file_hash = self.cache.get_file_hash(video_path) if self.cache else ""
@@ -206,6 +199,6 @@ class VideoFeatureExtractor:
         
         # 保存到缓存
         if use_cache and self.cache:
-            self.cache.set(features)
+            self.cache.set(features, profile=self.cache_profile)
         
         return features

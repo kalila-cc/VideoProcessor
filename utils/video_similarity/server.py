@@ -16,12 +16,15 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from .config import PROJECT_ROOT, load_processor_config, resolve_project_path
+from .tasks import TaskManager, TaskBusy, TaskFailure
+from .recycle import recycle_file
 
 class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
     """
     Custom handler to serve the similarity report and handle pruning API calls.
     Supports serving absolute paths via /stream/<path>
     """
+    _TASKS = None
     _SESSION_DATA = []  # 会话期间过滤后的活跃数据
     _DISMISSED_FILE = None  # dismissed.json 文件路径
     _DISMISSED_PAIRS = {}  # 已忽略的视频对 {pair_id: {...}}
@@ -51,6 +54,13 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
         Translate URL path to local filesystem path.
         Overrides default behavior to support absolute path streaming.
         """
+        if path.startswith('/assets/'):
+            asset_root = (Path(__file__).parent / 'assets').resolve()
+            asset = (asset_root / unquote(path[8:]).split('?')[0]).resolve()
+            if not asset.is_relative_to(asset_root):
+                return str(asset_root / '__not_found__')
+            return str(asset)
+
         # Virtual path for streaming absolute files
         if path.startswith('/stream/'):
             # URL format: /stream/D%3A/Videos/My%20Video.mp4
@@ -66,25 +76,64 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
         return super().translate_path(path)
 
     def do_POST(self):
+        try:
+            self._dispatch_post()
+        except (ValueError, json.JSONDecodeError) as exc:
+            self.send_json_response({'success': False, 'error': str(exc)}, 400)
+        except Exception as exc:
+            self.log_exception_stack('POST request failed', exc)
+            self.send_json_response({'success': False, 'error': str(exc)}, 500)
+
+    def _dispatch_post(self):
         """Handle API requests (e.g., pruning files)."""
+        origin = self.headers.get('Origin')
+        if origin and origin not in ('http://' + self.headers.get('Host', ''), 'https://' + self.headers.get('Host', '')):
+            self.send_json_response({'success': False, 'error': '不接受其他网站发起的文件操作。'}, 403)
+            return
         if self.path == '/api/prune':
-            self.handle_prune()
+            self._guard_mutation(self.handle_prune)
         elif self.path == '/api/open-explorer':
             self.handle_open_explorer()
         elif self.path == '/api/dismiss':
-            self.handle_dismiss()
+            self._guard_mutation(self.handle_dismiss)
         elif self.path == '/api/download-library/classify':
-            self.handle_download_library_classify()
+            self._start_task('classify', '分类并规范命名', self.classify_downloads)
         elif self.path == '/api/download-library/rename':
-            self.handle_download_library_rename()
+            self._start_task('rename', '规范命名', self.rename_downloads)
         elif self.path == '/api/download-library/migrate':
-            self.handle_download_library_migrate()
+            self._start_task('migrate', '迁移入库并生成缓存', self.migrate_downloads)
         elif self.path == '/api/similarity/refresh':
             self.handle_similarity_refresh()
         elif self.path == '/api/cache/orphans':
             self.handle_cache_orphans()
+        elif self.path == '/api/cache/repair':
+            self._start_task('cache_repair', '补全缺失特征缓存', self.repair_cache)
+        elif self.path == '/api/cache/rebuild':
+            self._start_task('cache_rebuild', '复用特征并重建缓存索引', self.rebuild_cache_index)
+        elif self.path == '/api/tasks/clear':
+            self._guard_mutation(lambda: self.send_json_response(
+                {'success': True, 'cleared_count': self._TASKS.clear_history()}))
         else:
             self.send_error(404, "Endpoint not found")
+
+    def _guard_mutation(self, operation):
+        try:
+            with self._TASKS.exclusive():
+                operation()
+        except TaskBusy as exc:
+            self.send_json_response({'success': False, 'error': str(exc)}, 409)
+
+    def _start_task(self, kind, label, operation):
+        try:
+            def execute(progress):
+                result = operation(progress)
+                if kind in ('classify', 'rename', 'migrate'):
+                    self._reload_session_from_disk(self.base_dir)
+                return result
+            task = self._TASKS.start(kind, label, execute)
+            self.send_json_response({'success': True, 'task': task}, 202)
+        except TaskBusy as exc:
+            self.send_json_response({'success': False, 'error': str(exc)}, 409)
 
     def do_GET(self):
         """Handle GET requests including API endpoints."""
@@ -92,6 +141,19 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
         
         parsed = urlparse(self.path)
         
+        if parsed.path == '/api/tasks':
+            snapshot = self._TASKS.snapshot()
+            snapshot.update(success=True, active_pairs=len(self._SESSION_DATA))
+            self.send_json_response(snapshot)
+            return
+        if parsed.path == '/api/cache/orphans/status':
+            self.handle_cache_orphans_status()
+            return
+        if parsed.path.startswith('/api/tasks/'):
+            task = self._TASKS.snapshot(parsed.path.rsplit('/', 1)[-1])
+            self.send_json_response({'success': bool(task), 'task': task}, 200 if task else 404)
+            return
+
         # 单个视频对 API: /api/pair?index=0
         if parsed.path == '/api/pair':
             self.handle_pair_api(parse_qs(parsed.query))
@@ -135,7 +197,7 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
 
     def end_headers(self):
         """添加禁用缓存的响应头"""
-        if self.path == '/' or self.path == '/index.html':
+        if self.path in ('/', '/index.html') or self.path.startswith(('/api/', '/assets/')):
             self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
             self.send_header('Pragma', 'no-cache')
             self.send_header('Expires', '0')
@@ -158,19 +220,23 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
         end = file_size - 1
 
         if range_header:
-            match = re.search(r'bytes=(\d+)-(\d*)', range_header)
-            if match:
+            match = re.fullmatch(r'bytes=(\d*)-(\d*)', range_header)
+            if match and match.group(1):
                 start = int(match.group(1))
-                if match.group(2):
-                    end = int(match.group(2))
-                
-                # 响应 206 Partial Content
-                self.send_response(206)
-                self.send_header('Content-Range', f'bytes {start}-{end}/{file_size}')
-                self.send_header('Content-Length', str(end - start + 1))
+                end = min(int(match.group(2)), end) if match.group(2) else end
+            elif match and match.group(2):
+                start = max(0, file_size - int(match.group(2)))
             else:
-                self.send_response(200)
-                self.send_header('Content-Length', str(file_size))
+                start = file_size
+            if start >= file_size or end < start:
+                self.send_response(416)
+                self.send_header('Content-Range', f'bytes */{file_size}')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            self.send_response(206)
+            self.send_header('Content-Range', f'bytes {start}-{end}/{file_size}')
+            self.send_header('Content-Length', str(end - start + 1))
         else:
             self.send_response(200)
             self.send_header('Content-Length', str(file_size))
@@ -341,8 +407,8 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
         min_kb = category['min_kb']
         max_kb = category['max_kb']
         if max_kb is None:
-            return f"{min_kb // 1000}MB+"
-        return f"{min_kb // 1000}-{max_kb // 1000}MB"
+            return f"{min_kb / 1024:g} MiB+"
+        return f"{min_kb / 1024:g}-{max_kb / 1024:g} MiB"
 
     @staticmethod
     def _category_for_size(size_kb, categories):
@@ -410,7 +476,9 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
 
         raise RuntimeError(f"无法为文件生成唯一规范名称: {file_path}")
 
-    def _normalize_download_category_names(self, cfg, selected_by_category=None):
+    def _normalize_download_category_names(self, cfg, selected_by_category=None, progress=None):
+        from .cache import FeatureCache
+        feature_cache = FeatureCache(str(cfg['cache_dir']))
         records = []
         errors = []
         renamed_count = 0
@@ -441,6 +509,8 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
 
             for source in sorted(files, key=lambda p: p.name.lower()):
                 scanned_count += 1
+                if progress:
+                    progress('规范命名', scanned_count - 1, None, source.name)
                 try:
                     current_name = source.name.lower()
                     archive_collision = current_name in archive_names
@@ -450,6 +520,7 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
 
                     new_name = self._timestamp_filename(source, used_names)
                     target_path = source.with_name(new_name)
+                    feature_cache.prepare_move(str(source))
                     shutil.move(str(source), str(target_path))
                     used_names.discard(current_name)
                     used_names.add(new_name.lower())
@@ -536,12 +607,16 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
             },
             'totals': {
                 'uncategorized_count': uncategorized_summary['count'],
+                'uncategorized_bytes': uncategorized_summary['total_bytes'],
                 'uncategorized_mb': uncategorized_summary['total_mb'],
                 'classified_count': classified_count,
+                'classified_bytes': classified_bytes,
                 'classified_mb': round(classified_bytes / (1024 * 1024), 2),
                 'download_total_count': uncategorized_summary['count'] + classified_count,
+                'download_total_bytes': uncategorized_summary['total_bytes'] + classified_bytes,
                 'download_total_mb': round((uncategorized_summary['total_bytes'] + classified_bytes) / (1024 * 1024), 2),
                 'archive_count': archive_count,
+                'archive_bytes': archive_bytes,
                 'archive_mb': round(archive_bytes / (1024 * 1024), 2),
                 'cache_count': cache_stats.get('count', 0),
                 'cache_mb': cache_stats.get('total_size_mb', 0),
@@ -589,196 +664,241 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
                 video_files.append(str(file_path))
         return video_files
 
+    def handle_cache_orphans_status(self):
+        try:
+            with self._TASKS.exclusive():
+                result = self._inspect_cache_orphans(dry_run=True)
+            self.send_json_response({'success': True, 'count': result['deleted_count'],
+                                     'bytes': result['freed_bytes'],
+                                     'error_count': result.get('error_count', 0),
+                                     'checked_at': datetime.now().isoformat(timespec='seconds')})
+        except TaskBusy as exc:
+            self.send_json_response({'success': False, 'error': str(exc)}, 409)
+        except Exception as exc:
+            self.send_json_response({'success': False, 'error': str(exc)}, 500)
+
+    def _inspect_cache_orphans(self, dry_run=True):
+        from .cache import FeatureCache
+        from .config import SimilarityConfig
+        from .janitor import CacheJanitor
+        cfg = self._load_download_library_config()
+        sim_config = SimilarityConfig()
+        sim_config.cache_dir = str(cfg['cache_dir'])
+        janitor = CacheJanitor(sim_config, FeatureCache(str(cfg['cache_dir'])))
+        video_files = self._collect_cache_valid_video_files()
+        result = janitor.clean_orphans(video_files, dry_run=dry_run)
+        result['valid_video_count'] = len(video_files)
+        return result
+
     def handle_cache_orphans(self):
-        try:
-            data = self._read_json_body()
-            dry_run = bool(data.get('dry_run', True))
-            if not dry_run and self._get_refresh_status().get('running'):
-                self.send_json_response({
-                    'success': False,
-                    'error': '相似比对正在运行，请等待完成后再执行缓存清理。',
-                }, 409)
-                return
+        data = self._read_json_body()
+        dry_run = bool(data.get('dry_run', True))
+        def operation(progress):
+            progress('检查缓存', message='正在核对现存视频与特征缓存')
+            result = self._inspect_cache_orphans(dry_run)
+            return {'success': result.get('status') == 'success', 'dry_run': dry_run,
+                    'cache_result': result, 'errors': result.get('errors', []) or
+                    ([{'error': f"{result['error_count']} 个缓存未能清理，请检查文件权限后重试"}] if result.get('error_count') else [])}
+        self._start_task('cache_preview' if dry_run else 'cache_cleanup',
+                         '预览孤立缓存' if dry_run else '清理孤立缓存', operation)
 
-            from .cache import FeatureCache
-            from .config import SimilarityConfig
-            from .janitor import CacheJanitor
+    def rebuild_cache_index(self, progress):
+        from .cache import FeatureCache
+        from .config import SimilarityConfig
+        from .extractor import VideoFeatureExtractor
+        cache = FeatureCache(str(self._load_download_library_config()['cache_dir']))
+        profile = VideoFeatureExtractor(SimilarityConfig(), cache).cache_profile
+        result = cache.rebuild_index(progress=lambda done, total:
+            progress('建立内容索引', done, total, '校验文件内容，复用已有特征，不重新解码'))
+        files = self._collect_cache_valid_video_files()
+        valid, rebuilt, missing = 0, 0, 0
+        records = []
+        for index, path in enumerate(files):
+            existed = (cache.cache_dir / (cache._get_cache_id(path) + '.json')).exists()
+            feature = cache.get(path, profile=profile)
+            if feature:
+                valid += 1
+                rebuilt += not existed
+            else:
+                missing += 1
+                records.append({'action': '需要补全特征', 'file': path})
+            progress('核对缓存覆盖', index + 1, len(files), Path(path).name)
+        return {'success': not result['errors'], 'indexed_count': result['indexed'],
+                'valid_count': valid, 'rebuilt_count': rebuilt, 'missing_count': missing,
+                'records': records, 'errors': result['errors']}
 
-            cfg = self._load_download_library_config()
-            sim_config = SimilarityConfig()
-            sim_config.cache_dir = str(cfg['cache_dir'])
-            feature_cache = FeatureCache(str(cfg['cache_dir']))
-            janitor = CacheJanitor(sim_config, feature_cache)
+    def repair_cache(self, progress):
+        from .cache import FeatureCache
+        from .config import SimilarityConfig
+        from .extractor import VideoFeatureExtractor
+        cfg = self._load_download_library_config()
+        config = SimilarityConfig()
+        config.cache_dir = str(cfg['cache_dir'])
+        cache = FeatureCache(config.cache_dir)
+        extractor = VideoFeatureExtractor(config, cache)
+        progress('检查缓存', message='查找缺少有效特征缓存的视频')
+        files = self._collect_cache_valid_video_files()
+        missing = [path for path in files if not cache.has(path, profile=extractor.cache_profile)]
+        records, errors = [], []
+        for index, path in enumerate(missing):
+            progress('补全缓存', index, len(missing), Path(path).name)
+            try:
+                extractor.extract(path, use_cache=True, verbose=False)
+                if not cache.has(path, profile=extractor.cache_profile):
+                    raise RuntimeError('特征提取完成，但缓存未成功保存，请检查磁盘空间和权限')
+                records.append({'action': '补全缓存', 'file': path, 'cached': True})
+            except Exception as exc:
+                errors.append({'file': path, 'error': str(exc)})
+            progress('补全缓存', index + 1, len(missing), Path(path).name)
+        return {'success': not errors, 'cached_count': len(records), 'records': records, 'errors': errors}
 
-            video_files = self._collect_cache_valid_video_files()
-            result = janitor.clean_orphans(video_files, dry_run=dry_run)
-            result['valid_video_count'] = len(video_files)
-            result['freed_mb'] = round(result.get('freed_bytes', 0) / (1024 * 1024), 2)
+    def classify_downloads(self, progress):
+        from .cache import FeatureCache
+        cfg = self._load_download_library_config()
+        feature_cache = FeatureCache(str(cfg['cache_dir']))
+        download_dir = cfg['download_dir']
+        files = self._scan_direct_videos(download_dir, cfg['extensions'])
+        records = []
+        errors = []
+        moved_by_category = {}
 
-            self.send_json_response({
-                'success': result.get('status') == 'success',
-                'dry_run': dry_run,
-                'result': result,
-            })
-        except Exception as e:
-            self.log_exception_stack("Cache orphan cleanup error", e)
-            self.send_json_response({'success': False, 'error': str(e)}, 500)
+        for index, source in enumerate(files):
+            progress('分类移动', index, len(files), source.name)
+            try:
+                size_bytes = source.stat().st_size
+                size_kb = math.ceil(size_bytes / 1024)
+                category = self._category_for_size(size_kb, cfg['categories'])
+                if not category:
+                    raise RuntimeError("No category matched")
 
-    def handle_download_library_classify(self):
-        try:
-            cfg = self._load_download_library_config()
-            download_dir = cfg['download_dir']
-            files = self._scan_direct_videos(download_dir, cfg['extensions'])
-            records = []
-            errors = []
-            moved_by_category = {}
+                target_dir = download_dir / category['name']
+                target_path = self._unique_target_path(target_dir, source.name)
+                feature_cache.prepare_move(str(source))
+                shutil.move(str(source), str(target_path))
+                moved_by_category.setdefault(category['name'], []).append(target_path)
+                records.append({
+                    'action': '分类移动',
+                    'file': source.name,
+                    'from': str(source),
+                    'to': str(target_path),
+                    'category': category['name'],
+                    'size_mb': round(size_bytes / (1024 * 1024), 2),
+                })
+            except Exception as e:
+                errors.append({'file': str(source), 'error': str(e)})
+
+        rename_result = self._normalize_download_category_names(cfg, moved_by_category, progress)
+        errors.extend(rename_result['errors'])
+        records.extend(rename_result['records'])
+
+        response = {
+            'success': len(errors) == 0,
+            'moved_count': len([r for r in records if r.get('action') == '分类移动']),
+            'classified_count': len([r for r in records if r.get('action') == '分类移动']),
+            'renamed_count': rename_result['renamed_count'],
+            'skipped_count': rename_result['skipped_count'],
+            'errors': errors,
+            'records': records,
+            'status': self._build_download_library_status(),
+        }
+        return response
+
+    def rename_downloads(self, progress):
+        cfg = self._load_download_library_config()
+        result = self._normalize_download_category_names(cfg, progress=progress)
+        response = {
+            'success': len(result['errors']) == 0,
+            'scanned_count': result['scanned_count'],
+            'renamed_count': result['renamed_count'],
+            'skipped_count': result['skipped_count'],
+            'errors': result['errors'],
+            'records': result['records'],
+            'status': self._build_download_library_status(),
+        }
+        return response
+
+    def migrate_downloads(self, progress):
+        cfg = self._load_download_library_config()
+        download_dir = cfg['download_dir']
+        archive_base = cfg['archive_base']
+        records = []
+        errors = []
+        cached_count = 0
+
+        from .cache import FeatureCache
+        from .config import SimilarityConfig
+        from .extractor import VideoFeatureExtractor
+
+        sim_config = SimilarityConfig()
+        sim_config.cache_dir = str(cfg['cache_dir'])
+        feature_cache = FeatureCache(str(cfg['cache_dir']))
+        extractor = VideoFeatureExtractor(sim_config, feature_cache)
+
+        rename_result = self._normalize_download_category_names(cfg, progress=progress)
+        records.extend(rename_result['records'])
+        errors.extend(rename_result['errors'])
+
+        migration_total = sum(len(self._scan_direct_videos(download_dir / c['name'], cfg['extensions'])) for c in cfg['categories'])
+        processed = 0
+        for category in cfg['categories']:
+            source_dir = download_dir / category['name']
+            target_dir = archive_base / category['archive_subdir']
+            files = self._scan_direct_videos(source_dir, cfg['extensions'])
 
             for source in files:
+                progress('迁移并生成缓存', processed, migration_total, source.name)
+                record = {
+                    'action': '迁移入库',
+                    'file': source.name,
+                    'category': category['name'],
+                    'from': str(source),
+                }
                 try:
                     size_bytes = source.stat().st_size
-                    size_kb = math.ceil(size_bytes / 1024)
-                    category = self._category_for_size(size_kb, cfg['categories'])
-                    if not category:
-                        raise RuntimeError("No category matched")
-
-                    target_dir = download_dir / category['name']
                     target_path = self._unique_target_path(target_dir, source.name)
+                    feature_cache.prepare_move(str(source))
                     shutil.move(str(source), str(target_path))
-                    moved_by_category.setdefault(category['name'], []).append(target_path)
-                    records.append({
-                        'action': '分类移动',
-                        'file': source.name,
-                        'from': str(source),
-                        'to': str(target_path),
-                        'category': category['name'],
-                        'size_mb': round(size_bytes / (1024 * 1024), 2),
-                    })
-                except Exception as e:
-                    errors.append({'file': str(source), 'error': str(e)})
+                    record['to'] = str(target_path)
+                    record['size_mb'] = round(size_bytes / (1024 * 1024), 2)
 
-            rename_result = self._normalize_download_category_names(cfg, moved_by_category)
-            errors.extend(rename_result['errors'])
-            records.extend(rename_result['records'])
-
-            response = {
-                'success': len(errors) == 0,
-                'moved_count': len([r for r in records if r.get('action') == '分类移动']),
-                'classified_count': len([r for r in records if r.get('action') == '分类移动']),
-                'renamed_count': rename_result['renamed_count'],
-                'skipped_count': rename_result['skipped_count'],
-                'errors': errors,
-                'records': records[:100],
-                'status': self._build_download_library_status(),
-            }
-            self.send_json_response(response)
-        except Exception as e:
-            self.log_exception_stack("Download library classify error", e)
-            self.send_json_response({'success': False, 'error': str(e)}, 500)
-
-    def handle_download_library_rename(self):
-        try:
-            cfg = self._load_download_library_config()
-            result = self._normalize_download_category_names(cfg)
-            response = {
-                'success': len(result['errors']) == 0,
-                'scanned_count': result['scanned_count'],
-                'renamed_count': result['renamed_count'],
-                'skipped_count': result['skipped_count'],
-                'errors': result['errors'],
-                'records': result['records'][:100],
-                'status': self._build_download_library_status(),
-            }
-            self.send_json_response(response)
-        except Exception as e:
-            self.log_exception_stack("Download library rename error", e)
-            self.send_json_response({'success': False, 'error': str(e)}, 500)
-
-    def handle_download_library_migrate(self):
-        try:
-            cfg = self._load_download_library_config()
-            download_dir = cfg['download_dir']
-            archive_base = cfg['archive_base']
-            records = []
-            errors = []
-            cached_count = 0
-
-            from .cache import FeatureCache
-            from .config import SimilarityConfig
-            from .extractor import VideoFeatureExtractor
-
-            sim_config = SimilarityConfig()
-            sim_config.cache_dir = str(cfg['cache_dir'])
-            feature_cache = FeatureCache(str(cfg['cache_dir']))
-            extractor = VideoFeatureExtractor(sim_config, feature_cache)
-
-            rename_result = self._normalize_download_category_names(cfg)
-            records.extend(rename_result['records'])
-            errors.extend(rename_result['errors'])
-
-            for category in cfg['categories']:
-                source_dir = download_dir / category['name']
-                target_dir = archive_base / category['archive_subdir']
-                files = self._scan_direct_videos(source_dir, cfg['extensions'])
-
-                for source in files:
-                    record = {
-                        'action': '迁移入库',
-                        'file': source.name,
-                        'category': category['name'],
-                        'from': str(source),
-                    }
                     try:
-                        size_bytes = source.stat().st_size
-                        target_path = self._unique_target_path(target_dir, source.name)
-                        shutil.move(str(source), str(target_path))
-                        record['to'] = str(target_path)
-                        record['size_mb'] = round(size_bytes / (1024 * 1024), 2)
+                        extractor.extract(str(target_path), use_cache=True, verbose=False)
+                        if not feature_cache.has(str(target_path)):
+                            raise RuntimeError('特征提取完成，但缓存未成功保存，请检查磁盘空间和权限')
+                        record['cached'] = True
+                        cached_count += 1
+                    except Exception as cache_error:
+                        record['cached'] = False
+                        record['cache_error'] = str(cache_error)
+                        errors.append({'file': str(target_path), 'stage': 'cache', 'error': str(cache_error)})
 
-                        try:
-                            extractor.extract(str(target_path), use_cache=True, verbose=False)
-                            record['cached'] = True
-                            cached_count += 1
-                        except Exception as cache_error:
-                            record['cached'] = False
-                            record['cache_error'] = str(cache_error)
-                            errors.append({'file': str(target_path), 'stage': 'cache', 'error': str(cache_error)})
+                    records.append(record)
+                except Exception as e:
+                    record['error'] = str(e)
+                    errors.append({'file': str(source), 'stage': 'move', 'error': str(e)})
+                    records.append(record)
+                processed += 1
+                progress('迁移并生成缓存', processed, migration_total, source.name)
 
-                        records.append(record)
-                    except Exception as e:
-                        record['error'] = str(e)
-                        errors.append({'file': str(source), 'stage': 'move', 'error': str(e)})
-                        records.append(record)
-
-            response = {
-                'success': len([e for e in errors if e.get('stage') in ('move', 'rename')]) == 0,
-                'renamed_count': rename_result['renamed_count'],
-                'skipped_count': rename_result['skipped_count'],
-                'migrated_count': len([r for r in records if r.get('action') == '迁移入库' and r.get('to')]),
-                'cached_count': cached_count,
-                'errors': errors,
-                'records': records[:100],
-                'status': self._build_download_library_status(),
-            }
-            self.send_json_response(response)
-        except Exception as e:
-            self.log_exception_stack("Download library migrate error", e)
-            self.send_json_response({'success': False, 'error': str(e)}, 500)
+        response = {
+            'success': len([e for e in errors if e.get('stage') in ('move', 'rename')]) == 0,
+            'renamed_count': rename_result['renamed_count'],
+            'skipped_count': rename_result['skipped_count'],
+            'migrated_count': len([r for r in records if r.get('action') == '迁移入库' and r.get('to')]),
+            'cached_count': cached_count,
+            'errors': errors,
+            'records': records,
+            'status': self._build_download_library_status(),
+        }
+        return response
 
     @staticmethod
     def _log_size_bucket(size_bytes):
-        if size_bytes <= 0:
-            return {
-                'bucket': -1,
-                'label': '0 B',
-                'min_bytes': 0,
-                'max_bytes': 0,
-            }
-
         size_mb = size_bytes / (1024 * 1024)
         if size_mb < 1:
             return {
                 'bucket': -1,
-                'label': '<1 MB',
+                'label': '<1 MiB',
                 'min_bytes': 0,
                 'max_bytes': 1024 * 1024,
             }
@@ -788,7 +908,7 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
         max_mb = 2 ** (exponent + 1)
         return {
             'bucket': exponent,
-            'label': f'{min_mb:g}-{max_mb:g} MB' if max_mb < 1024 else f'{min_mb / 1024:g}-{max_mb / 1024:g} GB',
+            'label': f'{min_mb:g}-{max_mb:g} MiB' if max_mb < 1024 else f'{min_mb / 1024:g}-{max_mb / 1024:g} GiB',
             'min_bytes': int(min_mb * 1024 * 1024),
             'max_bytes': int(max_mb * 1024 * 1024),
         }
@@ -854,6 +974,12 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
             histogram_map[key]['count'] += 1
             histogram_map[key]['total_bytes'] += size_bytes
 
+        # Keep empty bins so the doubling intervals remain continuous on charts.
+        if histogram_map:
+            for key in range(-1, max(histogram_map) + 1):
+                if key not in histogram_map:
+                    histogram_map[key] = {**self._log_size_bucket(0 if key == -1 else 2 ** key * 1024 ** 2),
+                                          'count': 0, 'total_bytes': 0}
         histogram = []
         for key in sorted(histogram_map):
             row = histogram_map[key]
@@ -945,7 +1071,9 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
         """
         try:
             response = {
-                'total': len(self._SESSION_DATA)
+                'total': len(self._SESSION_DATA),
+                'application': 'DownloadVideoProcessor',
+                'version': 2
             }
             self.send_json_response(response)
             
@@ -973,59 +1101,30 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
         })
 
     def handle_similarity_refresh(self):
-        try:
-            data = self._read_json_body()
-            mode = data.get('mode') or 'full_library'
-            output_dir = Path(self._SERVER_OUTPUT_DIR or self.base_dir).resolve()
-            command_info = self._build_similarity_refresh_command(mode, output_dir)
-        except Exception as e:
-            self.send_json_response({'success': False, 'error': str(e)}, 400)
+        data = self._read_json_body()
+        mode = data.get('mode') or 'incremental_downloads'
+        if mode not in ('incremental_downloads', 'full_library'):
+            self.send_json_response({'success': False, 'error': '未知比对模式'}, 400)
             return
-
-        now = datetime.now().isoformat(timespec='seconds')
-
-        with self._REFRESH_LOCK:
-            if self._REFRESH_STATUS.get('running'):
-                status = dict(self._REFRESH_STATUS)
-                status['active_pairs'] = len(self._SESSION_DATA)
-                self.send_json_response({
-                    'success': True,
-                    'started': False,
-                    'already_running': True,
-                    'status': status,
-                })
-                return
-
-            self._REFRESH_STATUS.update({
-                'running': True,
-                'phase': 'starting',
-                'mode': command_info['mode'],
-                'mode_label': command_info['label'],
-                'message': f"正在启动{command_info['label']}...",
-                'started_at': now,
-                'finished_at': None,
-                'return_code': None,
-                'total_pairs': len(self._SESSION_DATA),
-                'active_pairs': len(self._SESSION_DATA),
-                'error': None,
-                'last_output': '',
-            })
-            status = dict(self._REFRESH_STATUS)
-
-        worker = threading.Thread(
-            target=self._run_similarity_refresh_job,
-            args=(command_info,),
-            daemon=True,
-            name='similarity-refresh',
-        )
-        worker.start()
-
-        self.send_json_response({
-            'success': True,
-            'started': True,
-            'already_running': False,
-            'status': status,
-        })
+        output_dir = Path(self._SERVER_OUTPUT_DIR or self.base_dir).resolve()
+        def operation(progress):
+            classification = None
+            if mode == 'incremental_downloads' and data.get('classify_first'):
+                classification = self.classify_downloads(progress)
+                if not classification['success']:
+                    return classification
+            try:
+                info = self._build_similarity_refresh_command(mode, output_dir)
+                result = self._run_similarity_refresh_job(info, progress)
+            except Exception as exc:
+                if classification:
+                    raise TaskFailure(f'分类已完成，但比对未完成：{exc}', classification) from exc
+                raise
+            if classification:
+                result.update(records=classification['records'], moved_count=classification['moved_count'],
+                              renamed_count=classification['renamed_count'])
+            return result
+        self._start_task(mode, '下载区增量比对' if mode == 'incremental_downloads' else '全库相似扫描', operation)
 
     @classmethod
     def _build_similarity_refresh_command(cls, mode: str, output_dir: Path):
@@ -1036,11 +1135,19 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
         output_dir = Path(output_dir).resolve()
 
         if mode == 'incremental_downloads':
+            if not any(cls._scan_recursive_videos(Path(directory), cfg['extensions']) for directory in archive_dirs):
+                raise RuntimeError('视频库尚无视频，无需与已有库比对。可先迁移第一批视频入库。')
             download_videos = []
             for directory in download_dirs:
                 download_videos.extend(cls._scan_recursive_videos(Path(directory), cfg['extensions']))
             if not download_videos:
-                raise RuntimeError("下载规格目录中没有待比对视频，请先在下载整理页执行分类。")
+                uncategorized_videos = cls._scan_direct_videos(cfg['download_dir'], cfg['extensions'])
+                if uncategorized_videos:
+                    raise RuntimeError(
+                        f"下载规格目录中没有待比对视频，但下载根目录还有 {len(uncategorized_videos)} 个待分类视频，"
+                        "请先按当前配置分类到下载分组目录，再执行增量比对。"
+                    )
+                raise RuntimeError("下载区没有待比对视频，请先把视频放入下载根目录或当前配置的分组目录。")
 
             cmd = [
                 sys.executable,
@@ -1090,143 +1197,71 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
         raise RuntimeError(f"未知相似比对模式: {mode}")
 
     @classmethod
-    def _run_similarity_refresh_job(cls, command_info: dict):
-        output_dir = Path(command_info['output_dir']).resolve()
-        cmd = command_info['cmd']
+    def _run_similarity_refresh_job(cls, command_info, progress):
+        output_dir = Path(command_info['output_dir'])
+        report_path = output_dir / 'data.json'
+        old_report_time = report_path.stat().st_mtime_ns if report_path.exists() else None
         env = os.environ.copy()
         env['PYTHONIOENCODING'] = 'utf-8'
-
+        env['PYTHONUNBUFFERED'] = '1'
+        cls._set_refresh_status(running=True, phase='running', error=None,
+                                mode=command_info['mode'], mode_label=command_info['label'])
         try:
-            cls._set_refresh_status(
-                phase='running',
-                message=f"{command_info['label']}正在扫描视频并计算相似度...",
-                last_output='',
-            )
-            process = subprocess.Popen(
-                cmd,
-                cwd=str(PROJECT_ROOT),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                bufsize=1,
-                env=env,
-            )
-
-            if process.stdout:
+            progress('扫描与比对', message='读取缓存并提取视频特征，请保持后端运行')
+            with subprocess.Popen(command_info['cmd'], cwd=str(PROJECT_ROOT), stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True, encoding='utf-8',
+                                  errors='replace', env=env,
+                                  creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)) as process:
+                last_lines = []
                 for line in process.stdout:
                     message = line.strip()
                     if not message:
                         continue
-                    print(f"[Refresh] {message}")
-                    cls._set_refresh_status(
-                        phase='running',
-                        message=message,
-                        last_output=message,
-                    )
-
-            return_code = process.wait()
-            if return_code != 0:
-                cls._set_refresh_status(
-                    running=False,
-                    phase='failed',
-                    message=f'相似比对刷新失败，退出码 {return_code}',
-                    finished_at=datetime.now().isoformat(timespec='seconds'),
-                    return_code=return_code,
-                    error=f'Process exited with code {return_code}',
-                )
-                return
-
+                    last_lines = (last_lines + [message])[-8:]
+                    # tqdm output supplies real stage progress when available.
+                    match = re.search(r'(\d+)/(\d+)', message)
+                    progress('扫描与比对', int(match[1]) if match else 0,
+                             int(match[2]) if match else None, message[-500:])
+                    cls._set_refresh_status(message=message[-500:])
+                code = process.wait()
+                if code:
+                    raise RuntimeError('比对失败：' + '\n'.join(last_lines))
+            if not report_path.exists() or report_path.stat().st_mtime_ns == old_report_time:
+                raise RuntimeError('扫描未生成新报告，请检查视频目录和文件可读性。' + '\n'.join(last_lines))
             summary = cls._reload_session_from_disk(output_dir)
-            cls._set_refresh_status(
-                running=False,
-                phase='complete',
-                message=(
-                    f"{command_info['label']}完成：生成 {summary['raw_count']} 组，"
-                    f"当前展示 {summary['active_count']} 组"
-                ),
-                finished_at=datetime.now().isoformat(timespec='seconds'),
-                return_code=0,
-                mode=command_info['mode'],
-                mode_label=command_info['label'],
-                total_pairs=summary['raw_count'],
-                active_pairs=summary['active_count'],
-                error=None,
-            )
-        except Exception as e:
-            logging.error("Similarity refresh job failed")
-            logging.error(traceback.format_exc())
-            cls._set_refresh_status(
-                running=False,
-                phase='failed',
-                message=f'相似比对刷新失败：{e}',
-                finished_at=datetime.now().isoformat(timespec='seconds'),
-                return_code=None,
-                error=str(e),
-            )
-
+            cls._set_refresh_status(phase='complete', total_pairs=summary['raw_count'], error=None)
+            return {'success': True, **summary, 'mode': command_info['mode']}
+        except Exception as exc:
+            cls._set_refresh_status(phase='failed', error=str(exc))
+            raise
+        finally:
+            cls._set_refresh_status(running=False)
 
     def handle_prune(self):
-        """
-        Handle the pruning request.
-        Expects a JSON list of ABSOLUTE file paths to delete.
-        """
         try:
-            content_length = int(self.headers['Content-Length'])
-            post_data = self.rfile.read(content_length)
-            data = json.loads(post_data.decode('utf-8'))
-            
-            files_to_delete = data.get('files', [])
-            deleted_count = 0
-            errors = []
-
-            print(f"\n[Server] Received prune request for {len(files_to_delete)} files.")
-
-            for file_path in files_to_delete:
-                # We expect absolute paths now from the frontend logic
-                target_path = Path(file_path).resolve()
-                
+            data = self._read_json_body()
+            paths = data.get('files', [])
+            allowed = {str(Path(v['originalPath']).resolve()) for pair in self._SESSION_DATA for v in pair['videos']}
+            deleted, errors = [], []
+            if not paths:
+                raise ValueError('未选择视频')
+            for value in paths:
+                path = Path(value).resolve()
                 try:
-                    if not target_path.exists():
-                        errors.append(f"File not found: {file_path}")
-                        continue
-                        
-                    # Basic sanity check: Don't delete system files?
-                    # Since this is "pruning", maybe we trust the input.
-                    
-                    if target_path.is_symlink():
-                        # If for some reason we still have symlinks
-                        os.remove(target_path)
-                    else:
-                        os.remove(target_path)
-                        
-                    print(f"[Server] Deleted: {target_path}")
-                    deleted_count += 1
-                        
-                except Exception as e:
-                    errors.append(f"Error deleting {file_path}: {str(e)}")
-
-            # Update session state and persist to data.json
-            if deleted_count > 0:
-                self._update_state_after_prune(files_to_delete)
-
-            # Send response
-            response = {
-                'success': True,
-                'deleted_count': deleted_count,
-                'errors': errors
-            }
-            
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(response).encode('utf-8'))
-            
-        except Exception as e:
-            self.log_exception_stack("Critical Prune Error", e)
-            # 使用 send_json_response 而非 send_error，避免中文编码问题
-            self.send_json_response({'success': False, 'error': str(e)}, 500)
+                    if str(path) not in allowed:
+                        raise ValueError('视频已不在当前审阅列表，请刷新后重试')
+                    if not path.is_file():
+                        raise FileNotFoundError('文件不存在，请刷新列表')
+                    recycle_file(path)
+                    deleted.append(str(path))
+                except Exception as exc:
+                    errors.append({'file': str(path), 'error': str(exc)})
+            if deleted:
+                self._update_state_after_prune(deleted)
+            self.send_json_response({'success': not errors, 'deleted_count': len(deleted),
+                                     'errors': errors, 'total': len(self._SESSION_DATA)})
+        except Exception as exc:
+            self.send_json_response({'success': False, 'error': str(exc)}, 400)
 
     def handle_open_explorer(self):
         """Open Windows Explorer and select the specified file."""
@@ -1312,7 +1347,7 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
                 json.dump(new_data, f, ensure_ascii=False, indent=2)
             print(f"[Server] State updated. Removed {removed_count} pairs. Remaining: {len(new_data)}")
         except Exception as e:
-            print(f"[Server] Error persisting data.json: {e}")
+            raise RuntimeError(f"文件已移入回收站，但报告保存失败，请刷新：{e}") from e
 
     def handle_dismiss(self):
         """
@@ -1339,7 +1374,7 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
             self._remove_pair_from_session(path_a, path_b)
             
             print(f"[Server] Dismissed pair: {pair_id[:8]}...")
-            self.send_json_response({'success': True, 'pairId': pair_id})
+            self.send_json_response({'success': True, 'pairId': pair_id, 'total': len(self._SESSION_DATA)})
             
         except Exception as e:
             self.log_exception_stack("Dismiss API Error", e)
@@ -1371,23 +1406,16 @@ class SimilarityReportHandler(http.server.SimpleHTTPRequestHandler):
         return cls._DISMISSED_PAIRS
 
     @classmethod
-    def _save_dismissed_pair(cls, pair_id: str, path_a: str, path_b: str):
-        """保存忽略的视频对到缓存文件"""
-        cls._DISMISSED_PAIRS[pair_id] = {
-            'paths': sorted([str(Path(path_a).resolve()), str(Path(path_b).resolve())]),
-            'dismissed_at': datetime.now().isoformat()
-        }
-        
-        if cls._DISMISSED_FILE:
-            try:
-                cache_data = {
-                    'version': 1,
-                    'dismissed': cls._DISMISSED_PAIRS
-                }
-                with open(cls._DISMISSED_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(cache_data, f, ensure_ascii=False, indent=2)
-            except Exception as e:
-                logging.error(f"Error saving dismissed.json: {e}")
+    def _save_dismissed_pair(cls, pair_id, path_a, path_b):
+        updated = dict(cls._DISMISSED_PAIRS)
+        updated[pair_id] = {'paths': sorted([str(Path(path_a).resolve()), str(Path(path_b).resolve())]),
+                            'dismissed_at': datetime.now().isoformat()}
+        if not cls._DISMISSED_FILE:
+            raise RuntimeError('审阅记录保存位置尚未初始化')
+        temporary = cls._DISMISSED_FILE.with_suffix('.tmp')
+        temporary.write_text(json.dumps({'version': 1, 'dismissed': updated}, ensure_ascii=False, indent=2), encoding='utf-8')
+        temporary.replace(cls._DISMISSED_FILE)
+        cls._DISMISSED_PAIRS = updated
 
     @classmethod
     def _remove_pair_from_session(cls, path_a: str, path_b: str):
@@ -1452,6 +1480,14 @@ def run_server(output_dir, port=8000):
     """
     output_dir = Path(output_dir).resolve()
     
+    output_dir.mkdir(parents=True, exist_ok=True)
+    from .reporter import VideoSimilarityReporter
+    data_path = output_dir / 'data.json'
+    if not data_path.exists():
+        data_path.write_text('[]', encoding='utf-8')
+    VideoSimilarityReporter.generate_html_report(json.loads(data_path.read_text(encoding='utf-8')), output_dir)
+    SimilarityReportHandler._TASKS = TaskManager(output_dir / 'tasks.json')
+
     # 配置日志系统
     log_file = output_dir / "server.log"
     logging.basicConfig(
@@ -1526,7 +1562,7 @@ def run_server(output_dir, port=8000):
         allow_reuse_address = True
         daemon_threads = True
 
-    with ThreadedTCPServer(("", port), handler) as httpd:
+    with ThreadedTCPServer(("127.0.0.1", port), handler) as httpd:
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

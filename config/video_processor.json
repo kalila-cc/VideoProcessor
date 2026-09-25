@@ -5,28 +5,73 @@
   "output_dir": "output/video_similarity",
   "log_dir": "logs",
   "categories": {
-    "XS": {
-      "size_range_kb": [0, 10000],
-      "archive_subdir": "0_XS(0MB_10MB)"
+    "01_0-2MiB": {
+      "size_range_kb": [
+        0,
+        2048
+      ],
+      "archive_subdir": "01_0-2MiB"
     },
-    "S": {
-      "size_range_kb": [10000, 20000],
-      "archive_subdir": "1_S(10MB_20MB)"
+    "02_2-4MiB": {
+      "size_range_kb": [
+        2048,
+        4096
+      ],
+      "archive_subdir": "02_2-4MiB"
     },
-    "M": {
-      "size_range_kb": [20000, 40000],
-      "archive_subdir": "2_M(20MB_40MB)"
+    "03_4-6MiB": {
+      "size_range_kb": [
+        4096,
+        6144
+      ],
+      "archive_subdir": "03_4-6MiB"
     },
-    "L": {
-      "size_range_kb": [40000, 200000],
-      "archive_subdir": "3_L(40MB_200MB)"
+    "04_6-8MiB": {
+      "size_range_kb": [
+        6144,
+        8192
+      ],
+      "archive_subdir": "04_6-8MiB"
     },
-    "XL": {
-      "size_range_kb": [200000, null],
-      "archive_subdir": "4_XL(200MB_INF)"
+    "05_8-12MiB": {
+      "size_range_kb": [
+        8192,
+        12288
+      ],
+      "archive_subdir": "05_8-12MiB"
+    },
+    "06_12-16MiB": {
+      "size_range_kb": [
+        12288,
+        16384
+      ],
+      "archive_subdir": "06_12-16MiB"
+    },
+    "07_16-32MiB": {
+      "size_range_kb": [
+        16384,
+        32768
+      ],
+      "archive_subdir": "07_16-32MiB"
+    },
+    "08_32MiB-plus": {
+      "size_range_kb": [
+        32768,
+        null
+      ],
+      "archive_subdir": "08_32MiB-plus"
     }
   },
-  "video_extensions": [".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".m4v"],
+  "video_extensions": [
+    ".mp4",
+    ".avi",
+    ".mkv",
+    ".mov",
+    ".wmv",
+    ".flv",
+    ".webm",
+    ".m4v"
+  ],
   "base_dirs": [],
   "incremental_dirs": [],
   "similarity": {

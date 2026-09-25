@@ -2,6 +2,7 @@
 """Configuration loading for the video processor."""
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
@@ -21,7 +22,7 @@ def resolve_project_path(path_value: str) -> Path:
 
 def load_processor_config(config_path: str = None) -> Dict[str, Any]:
     """Load the single project configuration file."""
-    config_file = Path(config_path) if config_path else CONFIG_FILE
+    config_file = Path(config_path or os.environ.get('VIDEO_PROCESSOR_CONFIG') or CONFIG_FILE)
     if not config_file.exists():
         raise FileNotFoundError(f"Config file not found: {config_file}")
 

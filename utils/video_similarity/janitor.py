@@ -60,25 +60,21 @@ class CacheJanitor:
 
         # 3. 识别冗余文件
         all_cache_files = list(cache_dir.glob("*"))
+        candidates = {cf.stem for cf in all_cache_files
+                      if cf.is_file() and cf.suffix == '.json' and cf.stem not in valid_cache_ids}
+        valid_cache_ids.update(self.cache.referenced_cache_ids(video_files, candidate_ids=candidates))
         to_delete = []
         
         for cf in all_cache_files:
             # 忽略目录和正在写入的临时文件
-            if cf.is_dir() or cf.suffix == '.tmp':
-                continue
-                
-            # 特殊处理：强制清理旧版遗留的索引文件
-            if cf.name == 'cache_index.json':
-                to_delete.append(cf)
+            if cf.is_dir() or cf.suffix == '.tmp' or cf.name.startswith(FeatureCache.INDEX_NAME):
                 continue
                 
             # 处理特征 JSON 文件
             if cf.suffix == '.json':
                 if cf.stem not in valid_cache_ids:
                     to_delete.append(cf)
-            else:
-                # 非预期的文件类型也标记为冗余
-                to_delete.append(cf)
+            # Unrelated files and the lookup database are never feature orphans.
 
         # 4. 执行删除
         freed_bytes = 0

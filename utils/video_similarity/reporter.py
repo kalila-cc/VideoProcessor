@@ -20,8 +20,8 @@ def format_file_size(file_path: str) -> str:
     try:
         size = Path(file_path).stat().st_size
         if size < 1024 * 1024:
-            return f"{size / 1024:.1f}KB"
-        return f"{size / (1024 * 1024):.1f}MB"
+            return f"{size / 1024:.1f} KiB"
+        return f"{size / (1024 * 1024):.1f} MiB"
     except OSError:
         return "N/A"
 
@@ -79,6 +79,7 @@ class VideoSimilarityReporter:
             report_data.append({
                 "groupId": group_id,
                 "similarity": f"{pair['score']:.1%}",
+                "scoreDetails": pair.get('details', {}),
                 "recommend": recommend,
                 "videos": [
                     {
@@ -87,6 +88,8 @@ class VideoSimilarityReporter:
                         "path": f"/stream/{quote(str(vid_a['path']))}",
                         "originalPath": str(vid_a["path"]),
                         "duration": format_duration(vid_a["duration"]),
+                        "durationSeconds": vid_a["duration"],
+                        "sizeBytes": size_a,
                         "resolution": vid_a["resolution"],
                         "size": format_file_size(vid_a["path"]),
                     },
@@ -96,6 +99,8 @@ class VideoSimilarityReporter:
                         "path": f"/stream/{quote(str(vid_b['path']))}",
                         "originalPath": str(vid_b["path"]),
                         "duration": format_duration(vid_b["duration"]),
+                        "durationSeconds": vid_b["duration"],
+                        "sizeBytes": size_b,
                         "resolution": vid_b["resolution"],
                         "size": format_file_size(vid_b["path"]),
                     },

@@ -8,6 +8,18 @@ import numpy as np
 import imagehash
 
 
+def sample_frame_positions(total_frames, num_sample_frames):
+    """Frame positions used by the feature extractor."""
+    if total_frames <= num_sample_frames:
+        return list(range(total_frames))
+    positions = {0, total_frames - 1, total_frames // 2}
+    remaining = num_sample_frames - 3
+    if remaining > 0:
+        step = total_frames / (remaining + 1)
+        positions.update(min(int(i * step), total_frames - 1) for i in range(1, remaining + 1))
+    return sorted(positions)
+
+
 @dataclass
 class VideoFeatures:
     """视频特征数据"""
